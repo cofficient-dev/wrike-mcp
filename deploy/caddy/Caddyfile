@@ -1,0 +1,41 @@
+# Shared Caddy proxy: routes https://<host>/ to multiple MCP servers.
+# Certificates are obtained/renewed automatically by Caddy (ACME/Let's
+# Encrypt). Add one block (or subdomain block) per MCP server; service names
+# are resolvable on the mcp-proxy network.
+
+{
+	# Required for ACME account creation and expiry notices.
+	email admin@example.com
+}
+
+mcp.example.com {
+	# Security headers (mirrors the nginx variant).
+	header {
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+		-Server
+	}
+
+	# 60 MB request body limit (matches the nginx variant).
+	request_body {
+		max_size 60MB
+	}
+
+	# --- Wrike MCP (this project) -------------------------------------------
+	# reverse_proxy is streaming-friendly by default (no buffering, no
+	# read/write timeouts on streamed responses).
+	reverse_proxy wrike-mcp:3000
+
+	# --- Example: another MCP server by path --------------------------------
+	# handle_path /github/* {
+	#     reverse_proxy github-mcp:3000
+	# }
+	#
+	# Alternatively route by subdomain instead of path:
+	# github.mcp.example.com {
+	#     reverse_proxy github-mcp:3000
+	# }
+	# (Subdomain routing needs a wildcard cert — see the compose file note
+	#  about DNS-01, or just list each subdomain; Caddy gets one cert per
+	#  name automatically.)
+}

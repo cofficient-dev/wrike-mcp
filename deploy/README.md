@@ -29,7 +29,9 @@ https://github.mcp.example.com/    → github-mcp:3000
 
 ```bash
 docker network create mcp-proxy
-cd /opt/mcp-proxy                        # copy deploy/proxy/* there
+cd /opt/mcp-proxy                        # copy deploy/proxy/* (nginx) there
+#   or copy deploy/caddy/* (Caddy — auto-TLS, no certs/ needed) and skip
+#   the cert lines below
 mkdir -p certs                         # then put fullchain.pem + privkey.pem in it
 #   (one SAN or wildcard cert covering mcp.example.com and/or *.mcp.example.com)
 docker compose up -d
@@ -52,6 +54,17 @@ repeat the same pattern: no bundled proxy, join `mcp-proxy`, publish nothing.
 
 One `location` block (or subdomain `server` block) per server — see
 `deploy/proxy/default.conf` for a commented example.
+
+### Caddy alternative (recommended for auto-TLS)
+
+[`deploy/caddy/`](caddy/) is a drop-in Caddy variant of the shared proxy:
+Caddy obtains and renews Let's Encrypt certificates automatically — no
+certbot, no `certs/` folder, no renewal timer. Set your hostname and ACME
+email in [`Caddyfile`](caddy/Caddyfile), then
+`docker compose -f deploy/caddy/docker-compose.yml up -d`. Everything else
+(attach pattern, override, routing-by-name) is identical to the nginx
+variant. Wildcard certs need the DNS-01 challenge — see the notes in the
+compose file.
 
 ## Rules that keep this safe and simple
 

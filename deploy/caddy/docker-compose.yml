@@ -1,0 +1,46 @@
+# Shared reverse proxy (Caddy) for multiple MCP servers on one host.
+#
+# Caddy obtains and renews Let's Encrypt certificates automatically — no
+# certbot, no certs/ folder, no restart timer. This compose project owns
+# ports 80/443; each MCP server attaches to the `mcp-proxy` network and is
+# routed here by path or subdomain.
+#
+# Setup:
+#   1. Point DNS A records for your hostname(s) at this host.
+#   2. Edit Caddyfile: replace mcp.example.com with your hostname and set
+#      the ACME email (required by Let's Encrypt for expiry notices).
+#   3. Start:
+#        docker network create mcp-proxy
+#        docker compose -f deploy/caddy/docker-compose.yml up -d
+#
+# Certificates are stored in the `caddy-data` volume. For a *wildcard* cert
+# (needed for *.mcp.example.com subdomain routing) use the Caddy image with
+# your DNS provider's plugin and a DNS-01 challenge; single hostnames work
+# out of the box.
+
+services:
+  caddy:
+    image: caddy:2.8-alpine
+    container_name: mcp-proxy-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data       # TLS certs + ACME account keys
+      - caddy-config:/config
+    networks:
+      - mcp-proxy
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+
+networks:
+  mcp-proxy:
+    external: true
+
+volumes:
+  caddy-data:
+  caddy-config:

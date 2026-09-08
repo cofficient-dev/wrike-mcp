@@ -110,7 +110,9 @@ Users then connect at `https://wrike.example.com/connect`.
 variant: one nginx container fronts everything by path or subdomain, and each
 MCP server attaches to the common network with no published ports of its own.
 See [`deploy/README.md`](deploy/README.md) and
-`docker-compose.override.shared-proxy.yml.example`.
+`docker-compose.override.shared-proxy.yml.example`. A Caddy variant of the
+shared proxy (automatic Let's Encrypt — no certbot/renewals) lives in
+[`deploy/caddy/`](deploy/caddy/).
 
 
 **Updating**: `git pull && docker compose up -d --build` (the encrypted token
