@@ -72,7 +72,40 @@ docker compose up -d
 
 4. Continue with step 2 above to attach each MCP server. Add one route per
    server in the Caddyfile (instead of `default.conf`) — examples are
-   commented inside it.
+   commented inside it. The full configuration:
+
+```caddyfile
+{
+	# Required for ACME account creation and expiry notices.
+	email admin@example.com
+}
+
+mcp.example.com {
+	header {
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+		-Server
+	}
+
+	request_body {
+		max_size 60MB
+	}
+
+	# reverse_proxy is streaming-friendly by default (no buffering, no
+	# read/write timeouts on streamed responses).
+	reverse_proxy wrike-mcp:3000
+
+	# Another MCP server by path:
+	# handle_path /github/* {
+	#     reverse_proxy github-mcp:3000
+	# }
+	#
+	# Or by subdomain (one cert per name, obtained automatically):
+	# github.mcp.example.com {
+	#     reverse_proxy github-mcp:3000
+	# }
+}
+```
 
 Wildcard certs (`*.mcp.example.com`) need the DNS-01 challenge — see the
 notes in `deploy/caddy/docker-compose.yml`.
