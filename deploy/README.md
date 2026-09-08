@@ -60,6 +60,38 @@ If you don't already have a certificate, Caddy is the simpler option: it
 obtains and renews Let's Encrypt certificates automatically.
 
 1. Copy `deploy/caddy/*` to `/opt/mcp-proxy/` (instead of `deploy/proxy/*`).
+   That directory ends up with two files — `docker-compose.yml`:
+
+```yaml
+services:
+  caddy:
+    image: caddy:2.8-alpine
+    container_name: mcp-proxy-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data       # TLS certs + ACME account keys
+      - caddy-config:/config
+    networks:
+      - mcp-proxy
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+
+networks:
+  mcp-proxy:
+    external: true
+
+volumes:
+  caddy-data:
+  caddy-config:
+```
+
+   …and `Caddyfile` (full contents in step 4 below).
 2. Edit `/opt/mcp-proxy/Caddyfile`: replace `mcp.example.com` with your
    hostname and `admin@example.com` with your email.
 3. Start the proxy:
