@@ -1,0 +1,16 @@
+# Never let secrets or local state enter the build context / image.
+.env
+.env.*
+!.env.example
+certs/
+data/
+node_modules/
+dist/
+coverage/
+*.log
+.git/
+.gitignore
+README.md
+scripts/
+test/
+docker-compose.yml

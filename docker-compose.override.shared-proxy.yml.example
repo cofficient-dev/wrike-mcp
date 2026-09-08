@@ -1,0 +1,38 @@
+# Shared-proxy variant.
+#
+# Use when a single nginx reverse-proxy container fronts MULTIPLE MCP servers
+# on one host (e.g. https://host/mcp -> this server, https://host/github -> another).
+#
+# Setup:
+#   1. Create the shared proxy once (see deploy/proxy/docker-compose.yml):
+#        docker network create mcp-proxy
+#        docker compose -f deploy/proxy/docker-compose.yml up -d
+#   2. In this project: cp docker-compose.override.shared-proxy.yml.example docker-compose.override.yml
+#   3. docker compose up -d --build
+#
+# The override removes this project's own nginx and attaches the app to the
+# shared `mcp-proxy` network instead. Secrets still come only from .env.
+
+services:
+  wrike-mcp:
+    # Bind only within container networks; the shared proxy reaches us by name.
+    environment:
+      HOST: 0.0.0.0
+      PORT: 3000
+      TOKEN_STORE_PATH: /var/lib/wrike-mcp/tokens.json
+    expose:
+      - "3000"
+    networks:
+      - default
+      - mcp-proxy
+
+  # Disable the bundled nginx: the shared proxy fronts everything.
+  nginx:
+    profiles:
+      - disabled
+
+networks:
+  mcp-proxy:
+    # The external network created by deploy/proxy; the proxy resolves
+    # "wrike-mcp" by container/compose service name on this network.
+    external: true
