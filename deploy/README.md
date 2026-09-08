@@ -30,9 +30,8 @@ https://github.mcp.example.com/    → github-mcp:3000
 ```bash
 docker network create mcp-proxy
 cd /opt/mcp-proxy                        # copy deploy/proxy/* (nginx) there
-#   or copy deploy/caddy/* (Caddy — auto-TLS, no certs/ needed) and skip
-#   the cert lines below
-mkdir -p certs                         # then put fullchain.pem + privkey.pem in it
+mkdir -p certs                         # nginx only — Caddy needs no certs
+# put fullchain.pem + privkey.pem in certs/
 #   (one SAN or wildcard cert covering mcp.example.com and/or *.mcp.example.com)
 docker compose up -d
 ```
@@ -55,16 +54,28 @@ repeat the same pattern: no bundled proxy, join `mcp-proxy`, publish nothing.
 One `location` block (or subdomain `server` block) per server — see
 `deploy/proxy/default.conf` for a commented example.
 
-### Caddy alternative (recommended for auto-TLS)
+### Caddy alternative (automatic TLS — no certbot)
 
-[`deploy/caddy/`](caddy/) is a drop-in Caddy variant of the shared proxy:
-Caddy obtains and renews Let's Encrypt certificates automatically — no
-certbot, no `certs/` folder, no renewal timer. Set your hostname and ACME
-email in [`Caddyfile`](caddy/Caddyfile), then
-`docker compose -f deploy/caddy/docker-compose.yml up -d`. Everything else
-(attach pattern, override, routing-by-name) is identical to the nginx
-variant. Wildcard certs need the DNS-01 challenge — see the notes in the
-compose file.
+If you don't already have a certificate, Caddy is the simpler option: it
+obtains and renews Let's Encrypt certificates automatically.
+
+1. Copy `deploy/caddy/*` to `/opt/mcp-proxy/` (instead of `deploy/proxy/*`).
+2. Edit `/opt/mcp-proxy/Caddyfile`: replace `mcp.example.com` with your
+   hostname and `admin@example.com` with your email.
+3. Start the proxy:
+
+```bash
+docker network create mcp-proxy
+cd /opt/mcp-proxy
+docker compose up -d
+```
+
+4. Continue with step 2 above to attach each MCP server. Add one route per
+   server in the Caddyfile (instead of `default.conf`) — examples are
+   commented inside it.
+
+Wildcard certs (`*.mcp.example.com`) need the DNS-01 challenge — see the
+notes in `deploy/caddy/docker-compose.yml`.
 
 ## Rules that keep this safe and simple
 
@@ -73,7 +84,7 @@ compose file.
 - **Nothing else publishes ports** — only the proxy has `ports:`; every app uses `expose:` on the shared network. No accidental direct exposure.
 - **Per-service users** — each MCP server has its own per-user auth; users connect to each service separately (there is no cross-server SSO in the MCP ecosystem today). A user connecting to Wrike MCP and GitHub MCP holds two unrelated connection tokens.
 - **Memory budget** — proxy ~128 MB + ~100–200 MB per MCP server; size the droplet accordingly (2 GB ≈ proxy + 4–5 servers comfortably).
-- **Renewals** — certbot renewal copies new certs into `/opt/mcp-proxy/certs/` and runs `docker compose restart proxy` (monthly timer) — one cert to renew regardless of how many servers sit behind it.
+- **Renewals (nginx variant)** — certbot renewal copies new certs into `/opt/mcp-proxy/certs/` and runs `docker compose restart proxy` (monthly timer) — one cert to renew regardless of how many servers sit behind it. The Caddy variant renews automatically; nothing to do.
 
 ## Updating one server without touching the others
 
