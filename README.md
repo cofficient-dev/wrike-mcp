@@ -86,7 +86,9 @@ git clone <your-repo> /opt/wrike-mcp && cd /opt/wrike-mcp
 #    droplet run once:
 sudo apt install -y certbot
 sudo certbot certonly --standalone -d wrike.example.com
-sudo cp /etc/letsencrypt/live/wrike.example.com/{fullchain,privkey}.pem certs/
+mkdir -p certs
+sudo install -m 644 /etc/letsencrypt/live/wrike.example.com/fullchain.pem certs/
+sudo install -m 600 /etc/letsencrypt/live/wrike.example.com/privkey.pem certs/
 # (certs/ and .env are gitignored and dockerignored — they never enter images or the repo)
 # For automatic renewal, re-run the copy + `docker compose restart nginx` in a
 # monthly cron/systemd timer.

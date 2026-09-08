@@ -30,7 +30,7 @@ https://github.mcp.example.com/    → github-mcp:3000
 ```bash
 docker network create mcp-proxy
 cd /opt/mcp-proxy                        # copy deploy/proxy/* there
-# put fullchain.pem + privkey.pem in certs/
+mkdir -p certs                         # then put fullchain.pem + privkey.pem in it
 #   (one SAN or wildcard cert covering mcp.example.com and/or *.mcp.example.com)
 docker compose up -d
 ```
