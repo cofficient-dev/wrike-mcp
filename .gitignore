@@ -7,3 +7,5 @@ data/
 certs/
 *.log
 coverage/
+# Dirac agent cache
+.dirac-cache/
