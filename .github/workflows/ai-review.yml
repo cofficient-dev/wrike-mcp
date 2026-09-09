@@ -1,0 +1,11 @@
+name: AI Code Review
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+jobs:
+  review:
+    uses: cofficient-dev/central-workflows/.github/workflows/ai-review.yml@master
+    secrets:
+      OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
+

@@ -2,7 +2,7 @@
 
 A Model Context Protocol (MCP) server for the [Wrike API v4](https://developers.wrike.com/docs/overview), designed for **organisation-level deployment on the web**: each user connects their **own** Wrike account, and every token and secret stays encrypted at rest and invisible over the wire.
 
-Built with TypeScript, [`@modelcontextprotocol/sdk`](https://github.com/modelcontextprotocol/typescript-sdk) (Streamable HTTP transport), Express, and Zod. Tested with Vitest (78 tests) plus an end-to-end smoke script.
+Built with TypeScript, [`@modelcontextprotocol/sdk`](https://github.com/modelcontextprotocol/typescript-sdk) (Streamable HTTP transport), Express, and Zod. Tested with Vitest (88 tests) plus an end-to-end smoke script.
 
 ## How it works (per-user auth)
 
@@ -57,14 +57,19 @@ npm start
 | `WRIKE_CLIENT_ID`, `WRIKE_CLIENT_SECRET`, `WRIKE_REDIRECT_URI`, `WRIKE_SCOPES` | oauth | **App** credentials from the Wrike App Console — these identify the app, not any user. `WRIKE_SCOPES` comma-delimited (e.g. `Default,wsReadWrite`). |
 | `TOKEN_ENCRYPTION_KEY` | both | 64 hex chars (32 bytes) — AES-256-GCM key for the encrypted token store. Generate: `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"` |
 | `TOKEN_STORE_PATH` | both | Encrypted store location (default `data/tokens.json`). |
+| `PUBLIC_BASE_URL` | oauth | Public origin as MCP clients see it (include path prefix, e.g. `https://host/wrike`). Enables MCP-native OAuth sign-in (see below). |
 
 ### User flow (oauth mode)
 
+**Header-token flow (any MCP client):**
 1. User visits `https://your-host/connect` (optionally `?user=their-handle`).
 2. They approve access on Wrike's own consent page.
+
 3. The page shows their one-time connection token: `Authorization: Bearer wmc_...`.
 4. They paste that into their MCP client (most clients support custom headers on remote MCP servers).
 5. Done — all 24 tools now operate on **their** Wrike data.
+
+**Native sign-in (no token copying):** with `PUBLIC_BASE_URL` set, the server exposes the MCP OAuth discovery and authorization endpoints (`/.well-known/oauth-protected-resource`, `/.well-known/oauth-authorization-server`, `/oauth/authorize`, `/oauth/token`, `/oauth/register`). MCP clients like Claude then handle everything in-app: user clicks Connect, approves on Wrike's consent page, and the client receives the token itself — same per-user storage and isolation, no `wmc_...` pasting. In Claude's connector dialog pick "Always required" sign-in with "No client ID — register one automatically" (DCR). The header-token flow above keeps working in parallel for clients without OAuth support.
 
 ## Deployment (DigitalOcean droplet, Docker)
 
@@ -172,7 +177,7 @@ then nginx + certbot as in nginx/default.conf but proxying to 127.0.0.1:3000.
 ## Tests
 
 ```bash
-npm test                                  # 78 unit/integration tests
+npm test                                  # 88 unit/integration tests
 node scripts/e2e-peruser.cjs              # end-to-end smoke (build first)
 ```
 

@@ -1,6 +1,7 @@
 import express, { type Express, type Request, type Response, type NextFunction } from 'express';
 import { AuthManager } from './auth/authManager.js';
 import { OAuthStateManager, WRIKE_AUTHORIZE_URL, exchangeCodeForTokens, toStoredTokens } from './auth/oauth.js';
+import { McpOAuthServer, McpOauthError } from './auth/mcpOauth.js';
 import { type AppConfig } from './config.js';
 import { redact, errorMessage } from './redact.js';
 import type { SessionManager } from './transport.js';
@@ -43,6 +44,13 @@ export function createHttpApp({
     );
 
     // Rate limiting (simple in-memory; suitable for a single-instance deployment).
+    // MCP-native OAuth authorization server (only in oauth mode with PUBLIC_BASE_URL set).
+    const mcpOauth =
+        config.auth.mode === 'oauth' && config.publicBaseUrl
+            ? new McpOAuthServer(config.auth, authManager)
+            : undefined;
+    const publicBaseUrl = config.publicBaseUrl ?? '';
+
     const hits = new Map<string, { count: number; reset: number }>();
     const rateLimit = (perMinute: number) => (req: Request, res: Response, next: NextFunction) => {
         const key = req.ip ?? 'unknown';
@@ -67,6 +75,86 @@ export function createHttpApp({
     app.get('/healthz', (_req, res) => {
         res.json({ status: 'ok' });
     });
+
+    // --- MCP OAuth discovery (RFC 8414 / MCP spec) -------------------------
+    // Advertised only when PUBLIC_BASE_URL is configured (needed behind a
+    // path-prefixed or TLS-terminating proxy).
+    app.get('/.well-known/oauth-protected-resource', (_req, res) => {
+        if (!mcpOauth) {
+            res.status(404).json({ error: 'not_found' });
+            return;
+        }
+        res.json(mcpOauth.protectedResourceMetadata(publicBaseUrl));
+    });
+
+    app.get('/.well-known/oauth-authorization-server', (_req, res) => {
+        if (!mcpOauth) {
+            res.status(404).json({ error: 'not_found' });
+            return;
+        }
+        res.json(mcpOauth.authorizationServerMetadata(publicBaseUrl));
+    });
+
+    // --- MCP OAuth endpoints (oauth mode only) ------------------------------
+    if (mcpOauth) {
+        // Dynamic client registration (RFC 7591).
+        app.post('/oauth/register', rateLimit(10), (req, res) => {
+            try {
+                const client = mcpOauth.registerClient(req.body ?? {});
+                res.status(201).json(client);
+            } catch (err) {
+                if (err instanceof McpOauthError) {
+                    res.status(err.status).json({ error: err.code, error_description: err.description });
+                    return;
+                }
+                res.status(500).json({ error: 'server_error' });
+            }
+        });
+
+        // Authorization endpoint: sends the user to the Wrike connect flow.
+        app.get('/oauth/authorize', rateLimit(10), (req, res) => {
+            const q = req.query as Record<string, string | undefined>;
+            try {
+                const { redirectUrl } = mcpOauth.beginAuthorization({
+                    clientId: q.client_id ?? '',
+                    redirectUri: q.redirect_uri ?? '',
+                    codeChallenge: q.code_challenge,
+                    codeChallengeMethod: q.code_challenge_method,
+                    state: q.state,
+                    resource: q.resource,
+                });
+                res.redirect(302, redirectUrl);
+            } catch (err) {
+                if (err instanceof McpOauthError) {
+                    res.status(err.status).json({ error: err.code, error_description: err.description });
+                    return;
+                }
+                res.status(500).json({ error: 'server_error' });
+            }
+        });
+
+        // Token endpoint: code + PKCE verifier -> connection token.
+        app.post('/oauth/token', rateLimit(20), async (req, res) => {
+            try {
+                const token = await mcpOauth.exchangeCode(req.body ?? {});
+                res.json(token);
+            } catch (err) {
+                if (err instanceof McpOauthError) {
+                    res.status(err.status).json({
+                        error: err.code,
+                        error_description: err.description,
+                    });
+                    return;
+                }
+                res.status(500).json({ error: 'server_error', error_description: redact(errorMessage(err)) });
+            }
+        });
+
+        // Revocation endpoint (RFC 7009; no-op by design — see mcpOauth.ts).
+        app.post('/oauth/revoke-token', rateLimit(20), (_req, res) => {
+            res.status(200).end();
+        });
+    }
 
     /** Extracts the Bearer connection token from the request. */
     function bearerToken(req: Request): string | undefined {
@@ -96,7 +184,11 @@ export function createHttpApp({
             const rawHandle = typeof req.query.user === 'string' ? req.query.user.trim() : '';
             const handle = rawHandle.replace(/[^a-zA-Z0-9_.@-]/g, '').slice(0, 64);
             const pendingUserId = handle || `user-${randomHex(6)}`;
-            const state = oauthState.issue(pendingUserId);
+            // MCP OAuth flow: when the client sent the user here via /oauth/authorize,
+            // a signed resume token links this Wrike consent back to the client's
+            // pending authorization.
+            const resume = typeof req.query.resume === 'string' ? req.query.resume : undefined;
+            const state = oauthState.issue(pendingUserId, resume);
             const params = new URLSearchParams({
                 client_id: oauthAuth.clientId,
                 response_type: 'code',
@@ -123,6 +215,16 @@ export function createHttpApp({
                 const tokenResp = await exchangeCodeForTokens(oauthAuth, code, fetchImpl);
                 const tokens = toStoredTokens(tokenResp, 'www.wrike.com');
                 await authManager.storeUserTokens(userId, tokens);
+                // MCP OAuth flow: redirect straight back to the MCP client with
+                // the one-time code (client then exchanges it at /oauth/token).
+                if (verified.pendingResume && mcpOauth) {
+                    const back = await mcpOauth.completeWrikeAuthorization(verified.pendingResume);
+                    if (back) {
+                        await authManager.issueConnectionToken(userId);
+                        res.redirect(302, back.redirectUrl);
+                        return;
+                    }
+                }
                 const connectionToken = await authManager.issueConnectionToken(userId);
                 // Connection token is shown exactly once; it is stored only as a hash.
                 res.type('html').send(
