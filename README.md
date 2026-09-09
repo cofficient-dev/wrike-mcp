@@ -69,7 +69,23 @@ npm start
 4. They paste that into their MCP client (most clients support custom headers on remote MCP servers).
 5. Done — all 24 tools now operate on **their** Wrike data.
 
-**Native sign-in (no token copying):** with `PUBLIC_BASE_URL` set, the server exposes the MCP OAuth discovery and authorization endpoints (`/.well-known/oauth-protected-resource`, `/.well-known/oauth-authorization-server`, `/oauth/authorize`, `/oauth/token`, `/oauth/register`). MCP clients like Claude then handle everything in-app: user clicks Connect, approves on Wrike's consent page, and the client receives the token itself — same per-user storage and isolation, no `wmc_...` pasting. In Claude's connector dialog pick "Always required" sign-in with "No client ID — register one automatically" (DCR). The header-token flow above keeps working in parallel for clients without OAuth support.
+### Native sign-in (no token copying)
+
+With `PUBLIC_BASE_URL` set, the server exposes the MCP OAuth discovery and
+authorization endpoints (`/.well-known/oauth-protected-resource`,
+`/.well-known/oauth-authorization-server`, `/oauth/authorize`, `/oauth/token`,
+`/oauth/register`). MCP clients like Claude then handle everything in-app:
+the user clicks Connect, approves on Wrike's consent page, and the client
+receives the token itself — same per-user storage and isolation, no `wmc_...`
+pasting.
+
+**Claude setup:** Settings → Connectors → Add custom connector →
+URL `https://your-host/wrike/mcp` → Authentication **"Always required"** →
+OAuth client **"No client ID — register one automatically"** (dynamic client
+registration). The user signs in through the browser once and is done.
+
+The header-token flow above keeps working in parallel for clients without
+OAuth support.
 
 ## Deployment (DigitalOcean droplet, Docker)
 
