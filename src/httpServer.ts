@@ -220,7 +220,8 @@ export function createHttpApp({
                 if (verified.pendingResume && mcpOauth) {
                     const back = await mcpOauth.completeWrikeAuthorization(verified.pendingResume);
                     if (back) {
-                        await authManager.issueConnectionToken(userId);
+                        // Connection token is minted only at /oauth/token
+                        // exchange (exchangeCode) — one token per authorization.
                         res.redirect(302, back.redirectUrl);
                         return;
                     }

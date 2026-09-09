@@ -180,6 +180,12 @@ export class McpOAuthServer {
         resource?: string;
     }): { redirectUrl: string; resumeToken: string } {
         const registered = this.clientRedirectUris(params.clientId);
+        // Clients MUST register first (DCR at /oauth/register). The redirect_uri
+        // allow-list prevents an attacker from driving a user's consent to an
+        // attacker-controlled redirect_uri.
+        if (!registered) {
+            throw new McpOauthError('invalid_client', 401, 'unknown client_id: register at /oauth/register first');
+        }
         if (registered && !registered.includes(params.redirectUri)) {
             throw new McpOauthError('invalid_redirect_uri', 400, 'redirect_uri not registered for this client');
         }
