@@ -93,14 +93,17 @@ export class McpOAuthServer {
     private readonly clients = new Map<string, RegisteredClient>();
     private readonly secret: Buffer;
     private readonly scopes: string[];
+    private readonly publicBaseUrl: string;
 
     constructor(
         config: OAuthConfig,
         private readonly authManager: AuthManager,
+        publicBaseUrl: string,
         private readonly ttlMs: number = 10 * 60 * 1000
     ) {
         this.secret = createHmac('sha256', 'wrike-mcp-oauth-as').update(config.clientSecret).digest();
         this.scopes = config.scopes;
+        this.publicBaseUrl = publicBaseUrl;
     }
 
     private sign(payload: string): string {
@@ -204,7 +207,9 @@ export class McpOAuthServer {
             state: params.state,
         });
         return {
-            redirectUrl: `/connect?user=${encodeURIComponent(userId)}&resume=${encodeURIComponent(resumeToken)}`,
+            // Absolute URL: behind a path-prefixed proxy (handle_path /wrike/*)
+            // a relative redirect would drop the prefix and 404 at the proxy.
+            redirectUrl: `${this.publicBaseUrl}/connect?user=${encodeURIComponent(userId)}&resume=${encodeURIComponent(resumeToken)}`,
             resumeToken,
         };
     }
@@ -277,7 +282,6 @@ export class McpOAuthServer {
     }): Promise<{
         access_token: string;
         token_type: string;
-        expires_in: number;
         scope: string;
     }> {
         if (body.grant_type !== 'authorization_code') {
@@ -302,7 +306,8 @@ export class McpOAuthServer {
         return {
             access_token: connectionToken,
             token_type: 'Bearer',
-            expires_in: 0, // does not expire; users revoke at /revoke
+            // expires_in omitted: token does not expire (RFC 6749 — omit rather
+            // than 0, which clients may read as instantly expired).
             scope: this.scopes.join(' '),
         };
     }

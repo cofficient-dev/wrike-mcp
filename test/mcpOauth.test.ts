@@ -115,8 +115,11 @@ describe('MCP OAuth authorization-code flow', () => {
             state: 'client-state-123',
         });
         expect(auth.status).toBe(302);
-        const connectUrl = new URL(auth.headers.location!, 'https://mcp.example.com');
-        expect(connectUrl.pathname).toBe('/connect');
+        // Absolute URL with path prefix — a relative redirect would drop it
+        // behind handle_path /wrike/* routing.
+        const connectUrl = new URL(auth.headers.location!);
+        expect(connectUrl.origin).toBe('https://mcp.example.com');
+        expect(connectUrl.pathname).toBe('/wrike/connect');
         const resume = connectUrl.searchParams.get('resume')!;
 
         // 3. /connect redirects to Wrike; simulate Wrike's callback with the state.

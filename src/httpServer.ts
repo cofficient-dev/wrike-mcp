@@ -44,12 +44,13 @@ export function createHttpApp({
     );
 
     // Rate limiting (simple in-memory; suitable for a single-instance deployment).
+    const publicBaseUrl = config.publicBaseUrl ?? '';
     // MCP-native OAuth authorization server (only in oauth mode with PUBLIC_BASE_URL set).
     const mcpOauth =
         config.auth.mode === 'oauth' && config.publicBaseUrl
-            ? new McpOAuthServer(config.auth, authManager)
+            ? new McpOAuthServer(config.auth, authManager, publicBaseUrl)
             : undefined;
-    const publicBaseUrl = config.publicBaseUrl ?? '';
+    // (publicBaseUrl declared above)
 
     const hits = new Map<string, { count: number; reset: number }>();
     const rateLimit = (perMinute: number) => (req: Request, res: Response, next: NextFunction) => {
