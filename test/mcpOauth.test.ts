@@ -268,7 +268,7 @@ describe('MCP OAuth authorization-code flow', () => {
         expect(user?.connectionTokens).toHaveLength(1);
     });
 
-    it('requires PKCE', async () => {
+    it('requires PKCE, reporting the failure at the client redirect_uri', async () => {
         const { app } = makeApp(oauthConfig('https://mcp.example.com'));
         const reg = await request(app)
             .post('/oauth/register')
@@ -276,9 +276,94 @@ describe('MCP OAuth authorization-code flow', () => {
         const auth = await request(app).get('/oauth/authorize').query({
             client_id: reg.body.client_id as string,
             redirect_uri: 'https://claude.ai/callback',
+            state: 'client-state-pkce',
+        });
+        // RFC 6749 4.1.2.1: redirect_uri is registered, so the error goes back
+        // to the client rather than rendering as JSON in the browser.
+        expect(auth.status).toBe(302);
+        const back = new URL(auth.headers.location!);
+        expect(back.origin + back.pathname).toBe('https://claude.ai/callback');
+        expect(back.searchParams.get('error')).toBe('invalid_request');
+        expect(back.searchParams.get('error_description')).toContain('PKCE');
+        expect(back.searchParams.get('state')).toBe('client-state-pkce');
+        expect(back.searchParams.get('code')).toBeNull();
+    });
+
+    it('keeps JSON (no redirect) when the redirect_uri itself is not validated', async () => {
+        const { app } = makeApp(oauthConfig('https://mcp.example.com'));
+        const reg = await request(app)
+            .post('/oauth/register')
+            .send({ redirect_uris: ['https://claude.ai/callback'] });
+        // Unregistered redirect_uri: redirecting to it is exactly what must not
+        // happen, so the error stays a JSON body.
+        const auth = await request(app).get('/oauth/authorize').query({
+            client_id: reg.body.client_id as string,
+            redirect_uri: 'https://evil.example/callback',
         });
         expect(auth.status).toBe(400);
-        expect(auth.body.error).toBe('invalid_request');
+        expect(auth.body.error).toBe('invalid_redirect_uri');
+    });
+
+    it('rejects a resource indicator for a different server (RFC 8707)', async () => {
+        const { app } = makeApp(oauthConfig('https://mcp.example.com/wrike'));
+        const clientRedirectUri = 'https://claude.ai/callback';
+        const reg = await request(app).post('/oauth/register').send({ redirect_uris: [clientRedirectUri] });
+        const auth = await request(app).get('/oauth/authorize').query({
+            client_id: reg.body.client_id as string,
+            redirect_uri: clientRedirectUri,
+            code_challenge: pkce().challenge,
+            code_challenge_method: 'S256',
+            resource: 'https://someone-else.example/mcp',
+        });
+        expect(auth.status).toBe(302);
+        const back = new URL(auth.headers.location!);
+        expect(back.origin + back.pathname).toBe(clientRedirectUri);
+        expect(back.searchParams.get('error')).toBe('invalid_target');
+    });
+
+    it('accepts a resource indicator that identifies this server', async () => {
+        const { app } = makeApp(oauthConfig('https://mcp.example.com/wrike'));
+        const clientRedirectUri = 'https://claude.ai/callback';
+        const reg = await request(app).post('/oauth/register').send({ redirect_uris: [clientRedirectUri] });
+        // The base URL itself and a path beneath it (the /mcp endpoint) both
+        // identify this resource server.
+        for (const resource of ['https://mcp.example.com/wrike', 'https://mcp.example.com/wrike/mcp']) {
+            const auth = await request(app).get('/oauth/authorize').query({
+                client_id: reg.body.client_id as string,
+                redirect_uri: clientRedirectUri,
+                code_challenge: pkce().challenge,
+                code_challenge_method: 'S256',
+                resource,
+            });
+            expect(auth.status).toBe(302);
+            expect(new URL(auth.headers.location!).pathname).toBe('/wrike/connect');
+        }
+    });
+
+    it('does not mint a code when consent lands in a different user slot', async () => {
+        const { app, authManager } = makeApp(oauthConfig('https://mcp.example.com'));
+        const clientRedirectUri = 'https://claude.ai/callback';
+        const reg = await request(app).post('/oauth/register').send({ redirect_uris: [clientRedirectUri] });
+        const auth = await request(app).get('/oauth/authorize').query({
+            client_id: reg.body.client_id as string,
+            redirect_uri: clientRedirectUri,
+            code_challenge: pkce().challenge,
+            code_challenge_method: 'S256',
+        });
+        const connectUrl = new URL(auth.headers.location!, 'https://mcp.example.com');
+        // Crafted /connect: the attacker's resume token paired with a handle
+        // other than the one the authorization was started for.
+        const connect = await request(app).get('/connect').query({
+            user: 'someone-else',
+            resume: connectUrl.searchParams.get('resume')!,
+        });
+        const state = new URL(connect.headers.location!, 'https://login.wrike.com').searchParams.get('state')!;
+        const cb = await request(app).get('/oauth/callback').query({ code: 'wrike-code-mismatch', state });
+
+        // No code is handed to the client; the user gets their own token page.
+        expect(cb.status).toBe(200);
+        expect(cb.text).toContain('Authorization: Bearer');
+        expect(await authManager.listUsers()).toEqual(['someone-else']);
     });
 
     it('rejects DCR without http(s) redirect_uris', async () => {

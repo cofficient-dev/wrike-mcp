@@ -127,6 +127,19 @@ export function createHttpApp({
                 res.redirect(302, redirectUrl);
             } catch (err) {
                 if (err instanceof McpOauthError) {
+                    // RFC 6749 §4.1.2.1: once the redirect_uri is validated, the
+                    // error belongs at the client's redirect_uri — otherwise the
+                    // MCP client never learns why, and the user sees raw JSON.
+                    // Unknown client_id / redirect_uri stay JSON: redirecting to
+                    // an unvalidated URI is exactly what must not happen.
+                    if (err.redirectSafe && q.redirect_uri) {
+                        const back = new URL(q.redirect_uri);
+                        back.searchParams.set('error', err.code);
+                        back.searchParams.set('error_description', err.description);
+                        if (q.state) back.searchParams.set('state', q.state);
+                        res.redirect(302, back.toString());
+                        return;
+                    }
                     res.status(err.status).json({ error: err.code, error_description: err.description });
                     return;
                 }
@@ -219,7 +232,10 @@ export function createHttpApp({
                 // MCP OAuth flow: redirect straight back to the MCP client with
                 // the one-time code (client then exchanges it at /oauth/token).
                 if (verified.pendingResume && mcpOauth) {
-                    const back = await mcpOauth.completeWrikeAuthorization(verified.pendingResume);
+                    // userId is passed so the code is minted only when the slot
+                    // the Wrike tokens landed in is the one the authorization
+                    // was started for (/connect takes its handle from the query).
+                    const back = await mcpOauth.completeWrikeAuthorization(verified.pendingResume, userId);
                     if (back) {
                         // Connection token is minted only at /oauth/token
                         // exchange (exchangeCode) — one token per authorization.

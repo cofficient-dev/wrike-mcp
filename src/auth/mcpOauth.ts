@@ -52,6 +52,8 @@ interface PendingAuthorization {
     expiresAt: number;
     /** The MCP client's own state, echoed back with the code. */
     state?: string;
+    /** RFC 8707 resource indicator, validated at authorize, re-checked at exchange. */
+    resource?: string;
 }
 
 /** A completed authorization code (single-use, short-lived). */
@@ -62,6 +64,7 @@ interface IssuedCode {
     userId: string;
     expiresAt: number;
     state?: string;
+    resource?: string;
 }
 
 /** Minimal dynamically-registered client (RFC 7591); DCR without secrets. */
@@ -75,7 +78,13 @@ export class McpOauthError extends Error {
     constructor(
         public readonly code: string,
         public readonly status: number,
-        public readonly description: string
+        public readonly description: string,
+        /**
+         * True once client_id and redirect_uri are known-good, meaning the error
+         * MUST be delivered to the client's redirect_uri (RFC 6749 §4.1.2.1)
+         * rather than rendered as JSON in the user's browser.
+         */
+        public readonly redirectSafe: boolean = false
     ) {
         super(description);
         this.name = 'McpOauthError';
@@ -108,6 +117,42 @@ export class McpOAuthServer {
 
     private sign(payload: string): string {
         return createHmac('sha256', this.secret).update(payload).digest('base64url');
+    }
+
+    /**
+     * Drops expired pending authorizations and codes. Both are only removed on
+     * use otherwise, so abandoned flows (user never finishes Wrike consent) and
+     * unexchanged codes would accumulate for the life of the process.
+     */
+    private sweep(): void {
+        const now = Date.now();
+        for (const [token, p] of this.pending) {
+            if (p.expiresAt < now) this.pending.delete(token);
+        }
+        for (const [code, c] of this.codes) {
+            if (c.expiresAt < now) this.codes.delete(code);
+        }
+    }
+
+    /**
+     * RFC 8707 resource indicator check: the audience a client asks for must be
+     * this server. Same origin and a path under publicBaseUrl is accepted, so
+     * `<base>`, `<base>/` and `<base>/mcp` all pass; anything else is a token
+     * meant for a different resource server.
+     */
+    private resourceMatches(resource: string): boolean {
+        let asked: URL;
+        let self: URL;
+        try {
+            asked = new URL(resource);
+            self = new URL(this.publicBaseUrl);
+        } catch {
+            return false;
+        }
+        if (asked.origin !== self.origin) return false;
+        const base = self.pathname.replace(/\/$/, '');
+        const path = asked.pathname.replace(/\/$/, '');
+        return path === base || path.startsWith(`${base}/`);
     }
 
     /** PKCE S256 verification (RFC 7636). */
@@ -145,11 +190,20 @@ export class McpOAuthServer {
         }
         const clientId = `mcp_${randomBytes(16).toString('base64url')}`;
         this.clients.set(clientId, { clientId, redirectUris, createdAt: Date.now() });
-        // Keep the map bounded: drop registrations older than a day.
+        this.sweep();
+        // Keep the map bounded: drop registrations older than a day, then, if a
+        // burst of fresh registrations is still over the cap, evict oldest-first
+        // so an open DCR endpoint cannot grow the map without limit.
         if (this.clients.size > 1000) {
             const cutoff = Date.now() - 24 * 60 * 60 * 1000;
             for (const [id, c] of this.clients) {
                 if (c.createdAt < cutoff) this.clients.delete(id);
+            }
+            if (this.clients.size > 1000) {
+                const oldest = [...this.clients.values()].sort((a, b) => a.createdAt - b.createdAt);
+                for (const c of oldest.slice(0, this.clients.size - 1000)) {
+                    this.clients.delete(c.clientId);
+                }
             }
         }
         return {
@@ -182,18 +236,26 @@ export class McpOAuthServer {
         state?: string;
         resource?: string;
     }): { redirectUrl: string; resumeToken: string } {
+        this.sweep();
         const registered = this.clientRedirectUris(params.clientId);
         // Clients MUST register first (DCR at /oauth/register). The redirect_uri
         // allow-list prevents an attacker from driving a user's consent to an
         // attacker-controlled redirect_uri.
+        //
+        // These two checks run FIRST and are the only ones thrown without
+        // redirectSafe: until the redirect_uri is known-good it must not be
+        // redirected to (RFC 6749 §4.1.2.1).
         if (!registered) {
             throw new McpOauthError('invalid_client', 401, 'unknown client_id: register at /oauth/register first');
         }
-        if (registered && !registered.includes(params.redirectUri)) {
+        if (!registered.includes(params.redirectUri)) {
             throw new McpOauthError('invalid_redirect_uri', 400, 'redirect_uri not registered for this client');
         }
         if (!params.codeChallenge || (params.codeChallengeMethod ?? 'S256') !== 'S256') {
-            throw new McpOauthError('invalid_request', 400, 'PKCE (S256) code_challenge is required');
+            throw new McpOauthError('invalid_request', 400, 'PKCE (S256) code_challenge is required', true);
+        }
+        if (params.resource !== undefined && !this.resourceMatches(params.resource)) {
+            throw new McpOauthError('invalid_target', 400, 'resource does not identify this server', true);
         }
         const userId = `user-${randomBytes(6).toString('hex')}`;
         const resumeToken = this.issueResumeToken();
@@ -205,6 +267,7 @@ export class McpOAuthServer {
             userId,
             expiresAt: Date.now() + this.ttlMs,
             state: params.state,
+            resource: params.resource,
         });
         return {
             // Absolute URL: behind a path-prefixed proxy (handle_path /wrike/*)
@@ -240,16 +303,24 @@ export class McpOAuthServer {
      * Called when the Wrike /connect flow completes for a user that has a
      * pending MCP authorization: mints a one-time code for the client and
      * returns the client redirect (with state).
+     *
+     * `userId` is the slot the Wrike tokens were just stored under. /connect
+     * takes its handle from the query string, so a crafted URL can pair one
+     * user's consent with another authorization's resume token; the code must
+     * only be minted when the two agree.
      */
     async completeWrikeAuthorization(
-        resumeToken: string
+        resumeToken: string,
+        userId: string
     ): Promise<{ redirectUrl: string; state?: string } | undefined> {
+        this.sweep();
         const pending = this.pending.get(resumeToken);
         if (!pending || pending.expiresAt < Date.now() || !this.verifyResumeToken(resumeToken)) {
             this.pending.delete(resumeToken);
             return undefined;
         }
         this.pending.delete(resumeToken);
+        if (pending.userId !== userId) return undefined;
         const code = `mcdc_${randomBytes(32).toString('base64url')}`;
         this.codes.set(code, {
             clientId: pending.clientId,
@@ -258,6 +329,7 @@ export class McpOAuthServer {
             userId: pending.userId,
             expiresAt: Date.now() + 5 * 60 * 1000,
             state: pending.state,
+            resource: pending.resource,
         });
         const q = new URLSearchParams({ code });
         if (pending.state) q.set('state', pending.state);
@@ -279,11 +351,13 @@ export class McpOAuthServer {
         code_verifier?: string;
         client_id?: string;
         redirect_uri?: string;
+        resource?: string;
     }): Promise<{
         access_token: string;
         token_type: string;
         scope: string;
     }> {
+        this.sweep();
         if (body.grant_type !== 'authorization_code') {
             throw new McpOauthError('unsupported_grant_type', 400, 'only authorization_code is supported');
         }
@@ -300,6 +374,14 @@ export class McpOAuthServer {
         }
         if (!body.code_verifier || !this.verifyPkce(issued.codeChallenge, body.code_verifier)) {
             throw new McpOauthError('invalid_grant', 400, 'PKCE verification failed');
+        }
+        // RFC 8707: the audience asked for at exchange must be the one the code
+        // was issued for, and must still identify this server.
+        if (body.resource !== undefined && !this.resourceMatches(body.resource)) {
+            throw new McpOauthError('invalid_target', 400, 'resource does not identify this server');
+        }
+        if (issued.resource !== undefined && body.resource !== undefined && issued.resource !== body.resource) {
+            throw new McpOauthError('invalid_target', 400, 'resource does not match the authorization request');
         }
         this.codes.delete(body.code!); // single-use
         const connectionToken = await this.authManager.issueConnectionToken(issued.userId);
