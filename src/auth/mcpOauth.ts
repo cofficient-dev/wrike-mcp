@@ -80,6 +80,21 @@ interface RegisteredClient {
     clientName?: string;
 }
 
+/**
+ * A parseable http(s) URL. A prefix test alone accepts values like "https://"
+ * that later throw when constructed — including on the error-redirect path,
+ * where the throw would replace the RFC-correct redirect with a 500.
+ */
+function isHttpUrl(value: string): boolean {
+    let parsed: URL;
+    try {
+        parsed = new URL(value);
+    } catch {
+        return false;
+    }
+    return (parsed.protocol === 'http:' || parsed.protocol === 'https:') && parsed.host !== '';
+}
+
 export class McpOauthError extends Error {
     constructor(
         public readonly code: string,
@@ -191,7 +206,7 @@ export class McpOAuthServer {
         // Public endpoint: a non-array redirect_uris (e.g. a bare JSON string)
         // must be a 400 per RFC 7591, not a TypeError surfacing as server_error.
         const redirectUris = Array.isArray(body.redirect_uris)
-            ? body.redirect_uris.filter((u) => typeof u === 'string' && /^https?:\/\//.test(u))
+            ? body.redirect_uris.filter((u) => typeof u === 'string' && isHttpUrl(u))
             : [];
         if (redirectUris.length === 0) {
             throw new McpOauthError('invalid_redirect_uri', 400, 'redirect_uris must contain at least one http(s) URI');
@@ -435,9 +450,12 @@ export class McpOAuthServer {
     }
 
     /**
-     * RFC 7009 revocation. Presenting the token is authorisation to revoke it;
-     * an unknown token still returns success per RFC 7009 §2.2, so this never
-     * reveals whether a token exists. Handled in the /oauth/revoke-token route.
+     * RFC 7009 revocation, called by the /oauth/revoke-token route. Presenting
+     * the token is authorisation to revoke it; an unknown token still returns
+     * success per RFC 7009 §2.2, so this never reveals whether a token exists.
+     *
+     * Each MCP authorization gets its own generated user slot, so revoking the
+     * slot revokes exactly this grant.
      */
     async revoke(token: string): Promise<void> {
         const userId = await this.authManager.resolveConnectionToken(token);

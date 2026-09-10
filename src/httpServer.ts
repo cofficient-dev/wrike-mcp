@@ -147,13 +147,20 @@ export function createHttpApp({
                     // MCP client never learns why, and the user sees raw JSON.
                     // Unknown client_id / redirect_uri stay JSON: redirecting to
                     // an unvalidated URI is exactly what must not happen.
+                    // Belt and braces: registration rejects unparseable URIs,
+                    // but a throw here would turn a handled OAuth error into a
+                    // 500 and lose the error the client needs.
                     if (err.redirectSafe && q.redirect_uri) {
-                        const back = new URL(q.redirect_uri);
-                        back.searchParams.set('error', err.code);
-                        back.searchParams.set('error_description', err.description);
-                        if (q.state) back.searchParams.set('state', q.state);
-                        res.redirect(302, back.toString());
-                        return;
+                        try {
+                            const back = new URL(q.redirect_uri);
+                            back.searchParams.set('error', err.code);
+                            back.searchParams.set('error_description', err.description);
+                            if (q.state) back.searchParams.set('state', q.state);
+                            res.redirect(302, back.toString());
+                            return;
+                        } catch {
+                            /* not a usable redirect target — fall through to JSON */
+                        }
                     }
                     res.status(err.status).json({ error: err.code, error_description: err.description });
                     return;
@@ -190,12 +197,9 @@ export function createHttpApp({
         app.post('/oauth/revoke-token', rateLimit(20), async (req, res) => {
             const body = (req.body ?? {}) as Record<string, unknown>;
             const token = typeof body.token === 'string' ? body.token : undefined;
-            if (token) {
-                const userId = await authManager.resolveConnectionToken(token);
-                // Each MCP authorization gets its own generated user slot, so
-                // revoking the slot revokes exactly this grant.
-                if (userId) await authManager.revokeUser(userId);
-            }
+            // Single implementation in McpOAuthServer.revoke: revocation
+            // semantics must not exist in two places that can drift.
+            if (token) await mcpOauth.revoke(token);
             res.status(200).end();
         });
     }

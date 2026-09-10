@@ -406,6 +406,39 @@ describe('MCP OAuth authorization-code flow', () => {
         expect(reg.body.error).toBe('invalid_redirect_uri');
     });
 
+    it('rejects redirect_uris that pass the scheme prefix but do not parse', async () => {
+        const { app } = makeApp(oauthConfig('https://mcp.example.com'));
+        // 'https://' has the right prefix but no host: registering it would put
+        // a value in the allow-list that throws when constructed as a URL.
+        for (const u of ['https://', 'http://', 'https://?', 'https://#x']) {
+            const reg = await request(app).post('/oauth/register').send({ redirect_uris: [u] });
+            expect(reg.status).toBe(400);
+            expect(reg.body.error).toBe('invalid_redirect_uri');
+        }
+    });
+
+    it('never answers a handled authorize error with a 500', async () => {
+        const { app } = makeApp(oauthConfig('https://mcp.example.com'));
+        const clientRedirectUri = 'https://claude.ai/callback';
+        const reg = await request(app).post('/oauth/register').send({ redirect_uris: [clientRedirectUri] });
+        const clientId = reg.body.client_id as string;
+        // Every handled error is either an error redirect or a 4xx JSON body.
+        // The unparseable-URI case cannot be reached from here now that
+        // registration rejects those, so the try/catch around the redirect
+        // construction is defence only; this pins the observable contract.
+        const cases: Array<Record<string, string>> = [
+            { client_id: clientId, redirect_uri: clientRedirectUri }, // no PKCE
+            { client_id: clientId, redirect_uri: clientRedirectUri, code_challenge: 'x', resource: 'https://other.example' },
+            { client_id: clientId, redirect_uri: 'https://evil.example/cb', code_challenge: 'x' },
+            { client_id: 'never-registered', redirect_uri: clientRedirectUri, code_challenge: 'x' },
+        ];
+        for (const query of cases) {
+            const auth = await request(app).get('/oauth/authorize').query(query);
+            expect(auth.status).not.toBe(500);
+            expect([302, 400, 401]).toContain(auth.status);
+        }
+    });
+
     it('rejects malformed DCR bodies with 400, not 500', async () => {
         const { app } = makeApp(oauthConfig('https://mcp.example.com'));
         // Public endpoint: a non-array redirect_uris must not reach .filter.
