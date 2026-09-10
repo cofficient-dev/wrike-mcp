@@ -4,7 +4,7 @@ import { AuthManager } from './auth/authManager.js';
 import { OAuthStateManager, WRIKE_AUTHORIZE_URL, exchangeCodeForTokens, toStoredTokens } from './auth/oauth.js';
 import { McpOAuthServer, McpOauthError } from './auth/mcpOauth.js';
 import { type AppConfig } from './config.js';
-import { redact, errorMessage } from './redact.js';
+import { redact, errorMessage, registerSecret } from './redact.js';
 import type { SessionManager } from './transport.js';
 
 /**
@@ -43,6 +43,9 @@ export function createHttpApp({
     fetchImpl = fetch,
 }: HttpServerDeps): Express {
     const app = express();
+    // Scrub the configured secret verbatim from any outgoing error text: the
+    // shape-based patterns in redact() do not match a bare secret value.
+    registerSecret(config.auth.mode === 'oauth' ? config.auth.clientSecret : config.auth.pat);
     const oauthState = new OAuthStateManager(
         config.auth.mode === 'oauth' ? config.auth.clientSecret : 'unused'
     );
@@ -84,7 +87,15 @@ export function createHttpApp({
     // --- MCP OAuth discovery (RFC 8414 / MCP spec) -------------------------
     // Advertised only when PUBLIC_BASE_URL is configured (needed behind a
     // path-prefixed or TLS-terminating proxy).
-    app.get('/.well-known/oauth-protected-resource', (_req, res) => {
+    // RFC 8414 3.1 / RFC 9728 3.1 insert the well-known segment between the
+    // host and the issuer's path, so for issuer https://host/wrike a compliant
+    // client fetches https://host/.well-known/oauth-authorization-server/wrike.
+    // Behind a path-prefix proxy that route is host-rooted and needs its own
+    // proxy rule (see deploy/README.md); these regexes accept the trailing
+    // issuer path either way, so the app answers whichever form arrives.
+    const wellKnown = (name: string) => new RegExp(`^/\\.well-known/${name}(?:/.*)?$`);
+
+    app.get(wellKnown('oauth-protected-resource'), (_req, res) => {
         if (!mcpOauth) {
             res.status(404).json({ error: 'not_found' });
             return;
@@ -92,7 +103,7 @@ export function createHttpApp({
         res.json(mcpOauth.protectedResourceMetadata(publicBaseUrl));
     });
 
-    app.get('/.well-known/oauth-authorization-server', (_req, res) => {
+    app.get(wellKnown('oauth-authorization-server'), (_req, res) => {
         if (!mcpOauth) {
             res.status(404).json({ error: 'not_found' });
             return;
@@ -153,6 +164,10 @@ export function createHttpApp({
 
         // Token endpoint: code + PKCE verifier -> connection token.
         app.post('/oauth/token', rateLimit(20), async (req, res) => {
+            // RFC 6749 5.1: token responses must not be cached — this body
+            // carries the connection token.
+            res.set('Cache-Control', 'no-store');
+            res.set('Pragma', 'no-cache');
             try {
                 const token = await mcpOauth.exchangeCode(req.body ?? {});
                 res.json(token);
@@ -346,7 +361,20 @@ export function createHttpApp({
             try {
                 const tokenResp = await exchangeCodeForTokens(oauthAuth, code, fetchImpl);
                 const tokens = toStoredTokens(tokenResp, 'www.wrike.com');
-                await authManager.storeUserTokens(userId, tokens);
+                // Claim the slot atomically. The 409 at /connect is only a
+                // check-then-act: two browsers can both pass it before either
+                // finishes Wrike consent, and the loser would otherwise
+                // overwrite the winner's tokens under the same handle.
+                if (!(await authManager.storeUserTokensIfAbsent(userId, tokens))) {
+                    res.status(409).type('html').send(
+                        page(
+                            'Handle already in use',
+                            `<p>The handle <code>${escapeHtml(userId)}</code> was connected by someone else ` +
+                            `while you were authorizing.</p><p>Start again at <code>/connect</code> with a different handle.</p>`
+                        )
+                    );
+                    return;
+                }
                 // MCP OAuth flow: redirect straight back to the MCP client with
                 // the one-time code (client then exchanges it at /oauth/token).
                 if (verified.pendingResume && mcpOauth) {
@@ -363,6 +391,10 @@ export function createHttpApp({
                 }
                 const connectionToken = await authManager.issueConnectionToken(userId);
                 // Connection token is shown exactly once; it is stored only as a hash.
+                // This page shows the connection token in the clear; keep it
+                // out of intermediary and browser caches.
+                res.set('Cache-Control', 'no-store');
+                res.set('Pragma', 'no-cache');
                 res.type('html').send(
                     page(
                         'Wrike connected',

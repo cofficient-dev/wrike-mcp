@@ -112,6 +112,18 @@ describe('MCP OAuth discovery', () => {
         expect(res.body.code_challenge_methods_supported).toContain('S256');
     });
 
+    it('serves metadata at the RFC 8414/9728 issuer-suffixed paths', async () => {
+        const { app } = makeApp(oauthConfig('https://mcp.example.com/wrike'));
+        // RFC 8414 3.1 puts the well-known segment before the issuer path, so a
+        // compliant client asks for /.well-known/oauth-authorization-server/wrike.
+        const as = await request(app).get('/.well-known/oauth-authorization-server/wrike');
+        expect(as.status).toBe(200);
+        expect(as.body.issuer).toBe('https://mcp.example.com/wrike');
+        const pr = await request(app).get('/.well-known/oauth-protected-resource/wrike');
+        expect(pr.status).toBe(200);
+        expect(pr.body.resource).toBe('https://mcp.example.com/wrike');
+    });
+
     it('404s the metadata without PUBLIC_BASE_URL', async () => {
         const { app } = makeApp(oauthConfig());
         const res = await request(app).get('/.well-known/oauth-protected-resource');
@@ -499,10 +511,82 @@ describe('MCP OAuth authorization-code flow', () => {
         expect(await authManager.resolveConnectionToken(accessToken)).toBeUndefined();
     });
 
+    it('marks the token response no-store (RFC 6749 5.1)', async () => {
+        const { app } = makeApp(oauthConfig('https://mcp.example.com'));
+        const clientRedirectUri = 'https://claude.ai/callback';
+        const reg = await request(app).post('/oauth/register').send({ redirect_uris: [clientRedirectUri] });
+        const clientId = reg.body.client_id as string;
+        const { verifier, challenge } = pkce();
+        const auth = await request(app).get('/oauth/authorize').query({
+            client_id: clientId,
+            redirect_uri: clientRedirectUri,
+            code_challenge: challenge,
+            code_challenge_method: 'S256',
+        });
+        const connectUrl = new URL(auth.headers.location!, 'https://mcp.example.com');
+        const connect = await consent(app, connectUrl);
+        const state = new URL(connect.headers.location!, 'https://login.wrike.com').searchParams.get('state')!;
+        const cb = await request(app).get('/oauth/callback').query({ code: 'wrike-code-cc', state });
+        const code = new URL(cb.headers.location!).searchParams.get('code')!;
+        const tok = await request(app).post('/oauth/token').send({
+            grant_type: 'authorization_code',
+            code,
+            redirect_uri: clientRedirectUri,
+            client_id: clientId,
+            code_verifier: verifier,
+        });
+        expect(tok.status).toBe(200);
+        expect(tok.headers['cache-control']).toContain('no-store');
+    });
+
+    it('does not let two concurrent flows claim the same handle', async () => {
+        const { app, authManager } = makeApp(oauthConfig('https://mcp.example.com'));
+        // Both browsers pass the /connect 409 check before either completes
+        // Wrike consent — the guard there is only check-then-act.
+        const first = await request(app).get('/connect').query({ user: 'ben' });
+        const second = await request(app).get('/connect').query({ user: 'ben' });
+        expect(first.status).toBe(302);
+        expect(second.status).toBe(302);
+        const s1 = new URL(first.headers.location!, 'https://login.wrike.com').searchParams.get('state')!;
+        const s2 = new URL(second.headers.location!, 'https://login.wrike.com').searchParams.get('state')!;
+
+        const cb1 = await request(app).get('/oauth/callback').query({ code: 'race-1', state: s1 });
+        expect(cb1.status).toBe(200);
+        // The loser must not overwrite the winner's tokens: that would repoint
+        // every connection token already issued for 'ben' at another account.
+        const cb2 = await request(app).get('/oauth/callback').query({ code: 'race-2', state: s2 });
+        expect(cb2.status).toBe(409);
+        expect(await authManager.listUsers()).toEqual(['ben']);
+    });
+
     it('returns 200 for an unknown token (RFC 7009 2.2)', async () => {
         const { app } = makeApp(oauthConfig('https://mcp.example.com'));
         const res = await request(app).post('/oauth/revoke-token').send({ token: 'wmc_whatever' });
         expect(res.status).toBe(200);
+    });
+});
+
+describe('async handler failures', () => {
+    it('turns a store failure into a 500 rather than an unhandled rejection', async () => {
+        const { app, authManager } = makeApp(oauthConfig('https://mcp.example.com'));
+        const rejections: unknown[] = [];
+        const onRejection = (e: unknown) => rejections.push(e);
+        process.on('unhandledRejection', onRejection);
+        try {
+            // Simulates the encrypted store failing to read/decrypt.
+            authManager.resolveConnectionToken = async () => {
+                throw new Error('store unreadable: SECRET-CLIENT-SECRET');
+            };
+            const res = await request(app).post('/oauth/revoke-token').send({ token: 'wmc_x' });
+            // Express 5 forwards async rejections to the error middleware, so the
+            // process survives and the message is redacted on the way out.
+            expect(res.status).toBe(500);
+            expect(JSON.stringify(res.body)).not.toContain('SECRET-CLIENT-SECRET');
+            await new Promise((r) => setImmediate(r));
+            expect(rejections).toEqual([]);
+        } finally {
+            process.off('unhandledRejection', onRejection);
+        }
     });
 });
 

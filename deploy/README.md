@@ -103,6 +103,26 @@ prefix. The `/.well-known/*` and `/oauth/*` endpoints are mounted only when it
 is set, so without it native sign-in does not exist and clients get 404s from
 discovery with no other symptom.
 
+With a path prefix you also need a second Caddy route. RFC 8414 §3.1 and
+RFC 9728 §3.1 put the well-known segment *before* the issuer path, so a
+spec-compliant client fetches
+`https://mcp.example.com/.well-known/oauth-authorization-server/wrike` — which
+is host-rooted and never matches `handle_path /wrike/*`. Without this the
+prefixed location is the only one served, and strict clients fail discovery:
+
+```caddyfile
+# RFC 8414 / 9728 discovery for the /wrike-prefixed issuer.
+handle /.well-known/oauth-*-server/wrike* {
+    reverse_proxy wrike-mcp:3000
+}
+handle /.well-known/oauth-protected-resource/wrike* {
+    reverse_proxy wrike-mcp:3000
+}
+```
+
+Subdomain deployments (`https://wrike.example.com`) have an empty issuer path
+and need none of this.
+
 Then attach each MCP server (step below). Another server on the same host =
 another path block in the Caddyfile:
 

@@ -3,9 +3,19 @@ on:
   pull_request:
     types: [opened, synchronize]
 
+# Least privilege: the reusable workflow only needs to read the diff and
+# write review comments. Declared here because the caller's grant is the
+# ceiling for everything the called workflow can do.
+permissions:
+  contents: read
+  pull-requests: write
+
 jobs:
   review:
-    uses: cofficient-dev/central-workflows/.github/workflows/ai-review.yml@master
+    # Pinned to a full commit SHA, not @master: this workflow receives
+    # OLLAMA_API_KEY, so a mutable ref would let any change in
+    # central-workflows run with that secret in this repo's context.
+    # Bump deliberately after reviewing the diff.
+    uses: cofficient-dev/central-workflows/.github/workflows/ai-review.yml@239bcfa74a0c72033440a9a059cfac88fe8dc20b
     secrets:
       OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
-
