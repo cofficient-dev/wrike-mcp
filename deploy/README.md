@@ -98,6 +98,11 @@ MCP client URL `https://mcp.example.com/wrike/mcp`. In `.env`, set
 `WRIKE_REDIRECT_URI=https://mcp.example.com/wrike/oauth/callback` (and
 register exactly that URI in the Wrike App Console).
 
+Also set `PUBLIC_BASE_URL=https://mcp.example.com/wrike` — including the path
+prefix. The `/.well-known/*` and `/oauth/*` endpoints are mounted only when it
+is set, so without it native sign-in does not exist and clients get 404s from
+discovery with no other symptom.
+
 Then attach each MCP server (step below). Another server on the same host =
 another path block in the Caddyfile:
 

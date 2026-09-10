@@ -188,9 +188,11 @@ export class McpOAuthServer {
         redirect_uris: string[];
         token_endpoint_auth_method: string;
     } {
-        const redirectUris = (body.redirect_uris ?? []).filter(
-            (u) => typeof u === 'string' && /^https?:\/\//.test(u)
-        );
+        // Public endpoint: a non-array redirect_uris (e.g. a bare JSON string)
+        // must be a 400 per RFC 7591, not a TypeError surfacing as server_error.
+        const redirectUris = Array.isArray(body.redirect_uris)
+            ? body.redirect_uris.filter((u) => typeof u === 'string' && /^https?:\/\//.test(u))
+            : [];
         if (redirectUris.length === 0) {
             throw new McpOauthError('invalid_redirect_uri', 400, 'redirect_uris must contain at least one http(s) URI');
         }
@@ -246,9 +248,14 @@ export class McpOAuthServer {
         };
     }
 
+    /**
+     * The registered redirect_uri allow-list for a client, or undefined if the
+     * client never registered. beginAuthorization rejects that case outright
+     * (invalid_client) — this must stay an allow-list: an unregistered client
+     * would otherwise get its own redirect_uri bound to the code and validated
+     * against itself at exchange, which is no validation at all.
+     */
     private clientRedirectUris(clientId: string): string[] | undefined {
-        // Clients that did not register (CIMD/custom client IDs) are accepted;
-        // their redirect_uri is validated by exact-match at exchange time.
         return this.clients.get(clientId)?.redirectUris;
     }
 

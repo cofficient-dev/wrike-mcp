@@ -394,6 +394,16 @@ describe('MCP OAuth authorization-code flow', () => {
         expect(reg.body.error).toBe('invalid_redirect_uri');
     });
 
+    it('rejects malformed DCR bodies with 400, not 500', async () => {
+        const { app } = makeApp(oauthConfig('https://mcp.example.com'));
+        // Public endpoint: a non-array redirect_uris must not reach .filter.
+        for (const redirect_uris of ['https://claude.ai/callback', 42, {}, null]) {
+            const reg = await request(app).post('/oauth/register').send({ redirect_uris });
+            expect(reg.status).toBe(400);
+            expect(reg.body.error).toBe('invalid_redirect_uri');
+        }
+    });
+
     it('names the requesting client on the consent screen, HTML-escaped', async () => {
         const { app } = makeApp(oauthConfig('https://mcp.example.com'));
         const clientRedirectUri = 'https://claude.ai/callback';
