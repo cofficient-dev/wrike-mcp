@@ -81,9 +81,15 @@ interface RegisteredClient {
 }
 
 /**
- * A parseable http(s) URL. A prefix test alone accepts values like "https://"
- * that later throw when constructed — including on the error-redirect path,
- * where the throw would replace the RFC-correct redirect with a 500.
+ * A redirect URI usable as an OAuth redirection endpoint.
+ *
+ * A prefix test alone accepts values like "https://" that later throw when
+ * constructed — including on the error-redirect path, where the throw would
+ * replace the RFC-correct redirect with a 500.
+ *
+ * Fragments are rejected per RFC 6749 §3.1.2: a registered
+ * "https://app.example/cb#main" would otherwise take the authorization code
+ * into the fragment and the client would silently never receive it.
  */
 function isHttpUrl(value: string): boolean {
     let parsed: URL;
@@ -92,7 +98,11 @@ function isHttpUrl(value: string): boolean {
     } catch {
         return false;
     }
-    return (parsed.protocol === 'http:' || parsed.protocol === 'https:') && parsed.host !== '';
+    return (
+        (parsed.protocol === 'http:' || parsed.protocol === 'https:') &&
+        parsed.host !== '' &&
+        parsed.hash === ''
+    );
 }
 
 export class McpOauthError extends Error {
@@ -386,12 +396,12 @@ export class McpOAuthServer {
             state: pending.state,
             resource: pending.resource,
         });
-        const q = new URLSearchParams({ code });
-        if (pending.state) q.set('state', pending.state);
-        return {
-            redirectUrl: `${pending.redirectUri}${pending.redirectUri.includes('?') ? '&' : '?'}${q.toString()}`,
-            state: pending.state,
-        };
+        // Built with the URL API, not string concatenation: concatenation
+        // mishandles any redirect_uri that is not a plain path+query.
+        const back = new URL(pending.redirectUri);
+        back.searchParams.set('code', code);
+        if (pending.state) back.searchParams.set('state', pending.state);
+        return { redirectUrl: back.toString(), state: pending.state };
     }
 
     // -------------------------------------------------------------- token

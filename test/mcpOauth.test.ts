@@ -439,6 +439,38 @@ describe('MCP OAuth authorization-code flow', () => {
         }
     });
 
+    it('rejects redirect_uris with a fragment (RFC 6749 3.1.2)', async () => {
+        const { app } = makeApp(oauthConfig('https://mcp.example.com'));
+        // A registered '...#main' would take the code into the fragment, and
+        // the client would silently never receive it.
+        const reg = await request(app)
+            .post('/oauth/register')
+            .send({ redirect_uris: ['https://app.example/cb#main'] });
+        expect(reg.status).toBe(400);
+        expect(reg.body.error).toBe('invalid_redirect_uri');
+    });
+
+    it('puts the code in the query when the redirect_uri already has one', async () => {
+        const { app } = makeApp(oauthConfig('https://mcp.example.com'));
+        const clientRedirectUri = 'https://claude.ai/callback?tenant=acme';
+        const reg = await request(app).post('/oauth/register').send({ redirect_uris: [clientRedirectUri] });
+        const auth = await request(app).get('/oauth/authorize').query({
+            client_id: reg.body.client_id as string,
+            redirect_uri: clientRedirectUri,
+            code_challenge: pkce().challenge,
+            code_challenge_method: 'S256',
+            state: 'st',
+        });
+        const connectUrl = new URL(auth.headers.location!, 'https://mcp.example.com');
+        const connect = await consent(app, connectUrl);
+        const state = new URL(connect.headers.location!, 'https://login.wrike.com').searchParams.get('state')!;
+        const cb = await request(app).get('/oauth/callback').query({ code: 'wrike-frag', state });
+        const back = new URL(cb.headers.location!);
+        expect(back.searchParams.get('tenant')).toBe('acme');
+        expect(back.searchParams.get('code')).toBeTruthy();
+        expect(back.searchParams.get('state')).toBe('st');
+    });
+
     it('rejects malformed DCR bodies with 400, not 500', async () => {
         const { app } = makeApp(oauthConfig('https://mcp.example.com'));
         // Public endpoint: a non-array redirect_uris must not reach .filter.
@@ -472,6 +504,33 @@ describe('MCP OAuth authorization-code flow', () => {
         expect(shown.text).not.toContain('<img src=x');
         expect(shown.text).toContain('&lt;img src=x');
         expect(shown.text).toContain('not verified');
+    });
+
+    it('uses the __Host- cookie prefix over https, and not over http', async () => {
+        for (const [base, expected] of [
+            ['https://mcp.example.com', '__Host-wrike_mcp_consent'],
+            ['http://localhost:3000', 'wrike_mcp_consent'],
+        ] as const) {
+            const { app } = makeApp(oauthConfig(base));
+            const clientRedirectUri = 'https://claude.ai/callback';
+            const reg = await request(app).post('/oauth/register').send({ redirect_uris: [clientRedirectUri] });
+            const auth = await request(app).get('/oauth/authorize').query({
+                client_id: reg.body.client_id as string,
+                redirect_uri: clientRedirectUri,
+                code_challenge: pkce().challenge,
+                code_challenge_method: 'S256',
+            });
+            const connectUrl = new URL(auth.headers.location!, base);
+            const shown = await request(app).get('/connect').query({
+                user: connectUrl.searchParams.get('user')!,
+                resume: connectUrl.searchParams.get('resume')!,
+            });
+            const setCookie = (shown.headers['set-cookie'] as unknown as string[])[0]!;
+            // __Host- makes the name unforgeable from a sibling subdomain, but
+            // the browser only accepts it when Secure — so http falls back.
+            expect(setCookie.startsWith(`${expected}=`)).toBe(true);
+            expect(setCookie.includes('Secure')).toBe(base.startsWith('https://'));
+        }
     });
 
     it('will not skip the consent screen without the matching nonce cookie', async () => {

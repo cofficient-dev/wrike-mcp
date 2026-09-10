@@ -26,8 +26,18 @@ import type { SessionManager } from './transport.js';
  */
 
 
-/** Nonce cookie binding the MCP consent screen to the browser that saw it. */
-const CONSENT_COOKIE = 'wrike_mcp_consent';
+/**
+ * Nonce cookie binding the MCP consent screen to the browser that saw it.
+ *
+ * Over HTTPS the `__Host-` prefix is used: a browser only accepts such a
+ * cookie when it is Secure, Path=/ and has no Domain attribute, which makes
+ * the name unforgeable from a sibling subdomain. Without it, anyone
+ * controlling a sibling of the parent domain could plant a nonce of their
+ * choosing, pair it with their own resume token in an auto-submitted form,
+ * and skip the consent screen entirely. The prefix requires Secure, so plain
+ * HTTP (local development, tests) falls back to the bare name.
+ */
+const CONSENT_COOKIE_BASE = 'wrike_mcp_consent';
 
 export interface HttpServerDeps {
     config: AppConfig;
@@ -58,6 +68,11 @@ export function createHttpApp({
             ? new McpOAuthServer(config.auth, authManager, publicBaseUrl)
             : undefined;
     // (publicBaseUrl declared above)
+
+    // __Host- requires Secure, so it is only usable when the public origin is
+    // HTTPS; over plain HTTP the browser would reject the cookie outright.
+    const cookieSecure = publicBaseUrl.startsWith('https://');
+    const consentCookie = cookieSecure ? `__Host-${CONSENT_COOKIE_BASE}` : CONSENT_COOKIE_BASE;
 
     const hits = new Map<string, { count: number; reset: number }>();
     const rateLimit = (perMinute: number) => (req: Request, res: Response, next: NextFunction) => {
@@ -286,10 +301,10 @@ export function createHttpApp({
                     return;
                 }
                 const nonce = randomToken();
-                res.cookie(CONSENT_COOKIE, nonce, {
+                res.cookie(consentCookie, nonce, {
                     httpOnly: true,
                     sameSite: 'lax',
-                    secure: publicBaseUrl.startsWith('https://'),
+                    secure: cookieSecure,
                     maxAge: 10 * 60 * 1000,
                     path: '/',
                 });
@@ -328,7 +343,7 @@ export function createHttpApp({
             const nonce = typeof body.nonce === 'string' ? body.nonce : '';
             const rawHandle = typeof body.user === 'string' ? body.user.trim() : '';
             const handle = rawHandle.replace(/[^a-zA-Z0-9_.@-]/g, '').slice(0, 64);
-            const cookie = readCookie(req, CONSENT_COOKIE);
+            const cookie = readCookie(req, consentCookie);
 
             if (!cookie || !nonce || !timingSafeEqualStr(cookie, nonce)) {
                 res.status(403).type('html').send(
@@ -336,7 +351,7 @@ export function createHttpApp({
                 );
                 return;
             }
-            res.clearCookie(CONSENT_COOKIE, { path: '/' });
+            res.clearCookie(consentCookie, { path: '/' });
             if (!resume || !mcpOauth?.describePending(resume)) {
                 res.status(400).type('html').send(
                     page('Link expired', '<p>This sign-in link has expired. Start again from your MCP client.</p>')
