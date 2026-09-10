@@ -57,6 +57,33 @@ function makeApp(config: AppConfig, wrikeTokens?: { access_token: string; refres
     return { app, authManager, storePath: config.tokenStorePath };
 }
 
+/**
+ * Walks the MCP consent screen: GET /connect renders it, the user submits,
+ * and /connect/confirm redirects on to Wrike. Returns the Wrike redirect.
+ */
+async function consent(
+    app: ReturnType<typeof makeApp>['app'],
+    connectUrl: URL,
+    overrides: { user?: string } = {}
+) {
+    const shown = await request(app).get('/connect').query({
+        user: connectUrl.searchParams.get('user')!,
+        resume: connectUrl.searchParams.get('resume')!,
+    });
+    expect(shown.status).toBe(200);
+    const nonce = /name="nonce" value="([^"]+)"/.exec(shown.text)![1]!;
+    const cookie = (shown.headers['set-cookie'] as unknown as string[])[0]!;
+    return request(app)
+        .post('/connect/confirm')
+        .set('Cookie', cookie)
+        .type('form')
+        .send({
+            resume: connectUrl.searchParams.get('resume')!,
+            user: overrides.user ?? connectUrl.searchParams.get('user')!,
+            nonce,
+        });
+}
+
 function pkce() {
     const verifier = randomBytes(32).toString('base64url');
     const challenge = createHash('sha256').update(verifier).digest('base64url');
@@ -122,11 +149,15 @@ describe('MCP OAuth authorization-code flow', () => {
         expect(connectUrl.pathname).toBe('/wrike/connect');
         const resume = connectUrl.searchParams.get('resume')!;
 
-        // 3. /connect redirects to Wrike; simulate Wrike's callback with the state.
-        const connect = await request(app).get('/connect').query({
+        // 3. Consent screen names the client, then /connect goes on to Wrike.
+        const shown = await request(app).get('/connect').query({
             user: connectUrl.searchParams.get('user')!,
             resume,
         });
+        expect(shown.status).toBe(200);
+        expect(shown.text).toContain('claude');
+        expect(shown.text).toContain(clientId);
+        const connect = await consent(app, connectUrl);
         expect(connect.status).toBe(302);
         const wrikeUrl = new URL(connect.headers.location!, 'https://login.wrike.com');
         const state = wrikeUrl.searchParams.get('state')!;
@@ -180,11 +211,7 @@ describe('MCP OAuth authorization-code flow', () => {
             code_challenge_method: 'S256',
         });
         const connectUrl = new URL(auth.headers.location!, 'https://mcp.example.com');
-        const resume = connectUrl.searchParams.get('resume')!;
-        const connect = await request(app).get('/connect').query({
-            user: connectUrl.searchParams.get('user')!,
-            resume,
-        });
+        const connect = await consent(app, connectUrl);
         const state = new URL(connect.headers.location!, 'https://login.wrike.com').searchParams.get('state')!;
         const cb = await request(app).get('/oauth/callback').query({ code: 'wrike-code-2', state });
         const code = new URL(cb.headers.location!).searchParams.get('code')!;
@@ -243,10 +270,7 @@ describe('MCP OAuth authorization-code flow', () => {
             code_challenge_method: 'S256',
         });
         const connectUrl = new URL(auth.headers.location!, 'https://mcp.example.com');
-        const connect = await request(app).get('/connect').query({
-            user: connectUrl.searchParams.get('user')!,
-            resume: connectUrl.searchParams.get('resume')!,
-        });
+        const connect = await consent(app, connectUrl);
         const state = new URL(connect.headers.location!, 'https://login.wrike.com').searchParams.get('state')!;
         const cb = await request(app).get('/oauth/callback').query({ code: 'wrike-code-x', state });
         expect(cb.status).toBe(302);
@@ -351,12 +375,9 @@ describe('MCP OAuth authorization-code flow', () => {
             code_challenge_method: 'S256',
         });
         const connectUrl = new URL(auth.headers.location!, 'https://mcp.example.com');
-        // Crafted /connect: the attacker's resume token paired with a handle
+        // Crafted confirm: the attacker's resume token paired with a handle
         // other than the one the authorization was started for.
-        const connect = await request(app).get('/connect').query({
-            user: 'someone-else',
-            resume: connectUrl.searchParams.get('resume')!,
-        });
+        const connect = await consent(app, connectUrl, { user: 'someone-else' });
         const state = new URL(connect.headers.location!, 'https://login.wrike.com').searchParams.get('state')!;
         const cb = await request(app).get('/oauth/callback').query({ code: 'wrike-code-mismatch', state });
 
@@ -373,7 +394,102 @@ describe('MCP OAuth authorization-code flow', () => {
         expect(reg.body.error).toBe('invalid_redirect_uri');
     });
 
-    it('revocation endpoint returns 200 (no-op by design)', async () => {
+    it('names the requesting client on the consent screen, HTML-escaped', async () => {
+        const { app } = makeApp(oauthConfig('https://mcp.example.com'));
+        const clientRedirectUri = 'https://claude.ai/callback';
+        const reg = await request(app).post('/oauth/register').send({
+            client_name: '<img src=x onerror=alert(1)>Evil',
+            redirect_uris: [clientRedirectUri],
+        });
+        const auth = await request(app).get('/oauth/authorize').query({
+            client_id: reg.body.client_id as string,
+            redirect_uri: clientRedirectUri,
+            code_challenge: pkce().challenge,
+            code_challenge_method: 'S256',
+        });
+        const connectUrl = new URL(auth.headers.location!, 'https://mcp.example.com');
+        const shown = await request(app).get('/connect').query({
+            user: connectUrl.searchParams.get('user')!,
+            resume: connectUrl.searchParams.get('resume')!,
+        });
+        expect(shown.status).toBe(200);
+        // client_name is attacker-controlled: displayed, never rendered as markup.
+        expect(shown.text).not.toContain('<img src=x');
+        expect(shown.text).toContain('&lt;img src=x');
+        expect(shown.text).toContain('not verified');
+    });
+
+    it('will not skip the consent screen without the matching nonce cookie', async () => {
+        const { app, authManager } = makeApp(oauthConfig('https://mcp.example.com'));
+        const clientRedirectUri = 'https://claude.ai/callback';
+        const reg = await request(app).post('/oauth/register').send({ redirect_uris: [clientRedirectUri] });
+        const auth = await request(app).get('/oauth/authorize').query({
+            client_id: reg.body.client_id as string,
+            redirect_uri: clientRedirectUri,
+            code_challenge: pkce().challenge,
+            code_challenge_method: 'S256',
+        });
+        const connectUrl = new URL(auth.headers.location!, 'https://mcp.example.com');
+
+        // A cross-site auto-submitted form carries no SameSite=Lax cookie.
+        const forged = await request(app).post('/connect/confirm').type('form').send({
+            resume: connectUrl.searchParams.get('resume')!,
+            user: connectUrl.searchParams.get('user')!,
+            nonce: 'guessed',
+        });
+        expect(forged.status).toBe(403);
+        expect(await authManager.listUsers()).toEqual([]);
+    });
+
+    it('refuses to take over a handle that is already connected', async () => {
+        const { app } = makeApp(oauthConfig('https://mcp.example.com'));
+        // First user claims the handle.
+        const first = await request(app).get('/connect').query({ user: 'ben' });
+        const state = new URL(first.headers.location!, 'https://login.wrike.com').searchParams.get('state')!;
+        expect((await request(app).get('/oauth/callback').query({ code: 'w1', state })).status).toBe(200);
+
+        // A second browser must not repoint that slot at a different Wrike account:
+        // connection tokens already issued for 'ben' resolve through it.
+        const second = await request(app).get('/connect').query({ user: 'ben' });
+        expect(second.status).toBe(409);
+        expect(second.text).toContain('already connected');
+    });
+
+    it('revocation endpoint revokes the presented token', async () => {
+        const { app, authManager } = makeApp(oauthConfig('https://mcp.example.com'));
+        const clientRedirectUri = 'https://claude.ai/callback';
+        const reg = await request(app).post('/oauth/register').send({ redirect_uris: [clientRedirectUri] });
+        const clientId = reg.body.client_id as string;
+        const { verifier, challenge } = pkce();
+        const auth = await request(app).get('/oauth/authorize').query({
+            client_id: clientId,
+            redirect_uri: clientRedirectUri,
+            code_challenge: challenge,
+            code_challenge_method: 'S256',
+        });
+        const connectUrl = new URL(auth.headers.location!, 'https://mcp.example.com');
+        const connect = await consent(app, connectUrl);
+        const state = new URL(connect.headers.location!, 'https://login.wrike.com').searchParams.get('state')!;
+        const cb = await request(app).get('/oauth/callback').query({ code: 'wrike-code-rev', state });
+        const code = new URL(cb.headers.location!).searchParams.get('code')!;
+        const tok = await request(app).post('/oauth/token').send({
+            grant_type: 'authorization_code',
+            code,
+            redirect_uri: clientRedirectUri,
+            client_id: clientId,
+            code_verifier: verifier,
+        });
+        const accessToken = tok.body.access_token as string;
+        expect(await authManager.resolveConnectionToken(accessToken)).toBeDefined();
+
+        const res = await request(app).post('/oauth/revoke-token').send({ token: accessToken });
+        expect(res.status).toBe(200);
+        // The endpoint is advertised in the discovery document, so it must
+        // really revoke rather than silently succeed.
+        expect(await authManager.resolveConnectionToken(accessToken)).toBeUndefined();
+    });
+
+    it('returns 200 for an unknown token (RFC 7009 2.2)', async () => {
         const { app } = makeApp(oauthConfig('https://mcp.example.com'));
         const res = await request(app).post('/oauth/revoke-token').send({ token: 'wmc_whatever' });
         expect(res.status).toBe(200);

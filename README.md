@@ -63,6 +63,9 @@ npm start
 
 **Header-token flow (any MCP client):**
 1. User visits `https://your-host/connect` (optionally `?user=their-handle`).
+   A handle that is already connected is refused with 409 — pick another, or
+   revoke the existing connection first, since reusing it would repoint every
+   connection token already issued for that handle at the new Wrike account.
 2. They approve access on Wrike's own consent page.
 
 3. The page shows their one-time connection token: `Authorization: Bearer wmc_...`.
@@ -75,9 +78,14 @@ With `PUBLIC_BASE_URL` set, the server exposes the MCP OAuth discovery and
 authorization endpoints (`/.well-known/oauth-protected-resource`,
 `/.well-known/oauth-authorization-server`, `/oauth/authorize`, `/oauth/token`,
 `/oauth/register`). MCP clients like Claude then handle everything in-app:
-the user clicks Connect, approves on Wrike's consent page, and the client
-receives the token itself — same per-user storage and isolation, no `wmc_...`
-pasting.
+the user clicks Connect, confirms which MCP client is asking on this server's
+consent screen, approves on Wrike's consent page, and the client receives the
+token itself — same per-user storage and isolation, no `wmc_...` pasting.
+
+Registration is open (any client may self-register via DCR), so the consent
+screen names the requesting client and its redirect URI before the user reaches
+Wrike. `client_name` is supplied by the client and is **not** verified — it is
+shown so the user can spot a client they did not start, and the screen says so.
 
 **Claude setup:** Settings → Connectors → Add custom connector →
 URL `https://your-host/wrike/mcp` → Authentication **"Always required"** →

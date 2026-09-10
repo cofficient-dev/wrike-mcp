@@ -35,7 +35,10 @@ export function authorizationServerMetadata(baseUrl: string, scopes: string[]): 
         response_types_supported: ['code'],
         grant_types_supported: ['authorization_code'],
         code_challenge_methods_supported: ['S256'],
-        token_endpoint_auth_methods_supported: ['none', 'client_secret_post'],
+        // DCR issues no client_secret and the token endpoint never checks one,
+        // so 'none' is the only method actually supported — advertising
+        // client_secret_post would invite clients to send a secret we ignore.
+        token_endpoint_auth_methods_supported: ['none'],
         registration_endpoint_auth_methods_supported: ['none'],
         scopes_supported: scopes,
         service_documentation: `${baseUrl}/connect`,
@@ -54,6 +57,8 @@ interface PendingAuthorization {
     state?: string;
     /** RFC 8707 resource indicator, validated at authorize, re-checked at exchange. */
     resource?: string;
+    /** client_name from DCR, shown on the consent screen so the user knows who is asking. */
+    clientName?: string;
 }
 
 /** A completed authorization code (single-use, short-lived). */
@@ -72,6 +77,7 @@ interface RegisteredClient {
     clientId: string;
     redirectUris: string[];
     createdAt: number;
+    clientName?: string;
 }
 
 export class McpOauthError extends Error {
@@ -189,7 +195,14 @@ export class McpOAuthServer {
             throw new McpOauthError('invalid_redirect_uri', 400, 'redirect_uris must contain at least one http(s) URI');
         }
         const clientId = `mcp_${randomBytes(16).toString('base64url')}`;
-        this.clients.set(clientId, { clientId, redirectUris, createdAt: Date.now() });
+        // client_name is display-only and attacker-controlled: it is never
+        // trusted for a decision, only shown (HTML-escaped) on the consent
+        // screen so the user can judge who is asking.
+        const clientName =
+            typeof body.client_name === 'string' && body.client_name.trim()
+                ? body.client_name.trim().slice(0, 120)
+                : undefined;
+        this.clients.set(clientId, { clientId, redirectUris, createdAt: Date.now(), clientName });
         this.sweep();
         // Keep the map bounded: drop registrations older than a day, then, if a
         // burst of fresh registrations is still over the cap, evict oldest-first
@@ -211,6 +224,25 @@ export class McpOAuthServer {
             client_id_issued_at: Math.floor(Date.now() / 1000),
             redirect_uris: redirectUris,
             token_endpoint_auth_method: 'none',
+        };
+    }
+
+    /**
+     * Display details for a pending authorization, for the consent screen.
+     * Does NOT consume the pending entry — the user has not decided yet.
+     */
+    describePending(
+        resumeToken: string
+    ): { clientId: string; clientName?: string; redirectUri: string; userId: string } | undefined {
+        const pending = this.pending.get(resumeToken);
+        if (!pending || pending.expiresAt < Date.now() || !this.verifyResumeToken(resumeToken)) {
+            return undefined;
+        }
+        return {
+            clientId: pending.clientId,
+            clientName: pending.clientName,
+            redirectUri: pending.redirectUri,
+            userId: pending.userId,
         };
     }
 
@@ -268,6 +300,7 @@ export class McpOAuthServer {
             expiresAt: Date.now() + this.ttlMs,
             state: params.state,
             resource: params.resource,
+            clientName: this.clients.get(params.clientId)?.clientName,
         });
         return {
             // Absolute URL: behind a path-prefixed proxy (handle_path /wrike/*)
@@ -395,11 +428,12 @@ export class McpOAuthServer {
     }
 
     /**
-     * RFC 7009-style revocation for MCP clients (best-effort): revoking an
-     * unknown token still returns 200 per RFC 7009. Tokens are revoked only
-     * by their user at POST /revoke — deliberate no-op.
+     * RFC 7009 revocation. Presenting the token is authorisation to revoke it;
+     * an unknown token still returns success per RFC 7009 §2.2, so this never
+     * reveals whether a token exists. Handled in the /oauth/revoke-token route.
      */
-    async revoke(_token: string): Promise<void> {
-        /* no-op by design */
+    async revoke(token: string): Promise<void> {
+        const userId = await this.authManager.resolveConnectionToken(token);
+        if (userId) await this.authManager.revokeUser(userId);
     }
 }

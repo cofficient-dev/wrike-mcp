@@ -1,4 +1,5 @@
 import express, { type Express, type Request, type Response, type NextFunction } from 'express';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { AuthManager } from './auth/authManager.js';
 import { OAuthStateManager, WRIKE_AUTHORIZE_URL, exchangeCodeForTokens, toStoredTokens } from './auth/oauth.js';
 import { McpOAuthServer, McpOauthError } from './auth/mcpOauth.js';
@@ -24,6 +25,9 @@ import type { SessionManager } from './transport.js';
  *    passes through redact().
  */
 
+
+/** Nonce cookie binding the MCP consent screen to the browser that saw it. */
+const CONSENT_COOKIE = 'wrike_mcp_consent';
 
 export interface HttpServerDeps {
     config: AppConfig;
@@ -164,8 +168,19 @@ export function createHttpApp({
             }
         });
 
-        // Revocation endpoint (RFC 7009; no-op by design — see mcpOauth.ts).
-        app.post('/oauth/revoke-token', rateLimit(20), (_req, res) => {
+        // Revocation endpoint (RFC 7009). Advertised in the discovery document,
+        // so it must actually revoke: presenting the token is authorisation to
+        // revoke it. Unknown/invalid tokens still return 200 per RFC 7009 §2.2,
+        // which also avoids confirming whether a token exists.
+        app.post('/oauth/revoke-token', rateLimit(20), async (req, res) => {
+            const body = (req.body ?? {}) as Record<string, unknown>;
+            const token = typeof body.token === 'string' ? body.token : undefined;
+            if (token) {
+                const userId = await authManager.resolveConnectionToken(token);
+                // Each MCP authorization gets its own generated user slot, so
+                // revoking the slot revokes exactly this grant.
+                if (userId) await authManager.revokeUser(userId);
+            }
             res.status(200).end();
         });
     }
@@ -192,16 +207,8 @@ export function createHttpApp({
         const oauthAuth = config.auth;
 
         // --- Per-user connection flow ------------------------------------------
-        app.get('/connect', rateLimit(10), (req, res) => {
-            // The user supplies any handle they like (or we generate one); it only
-            // labels their entry — authentication is Wrike's own login page.
-            const rawHandle = typeof req.query.user === 'string' ? req.query.user.trim() : '';
-            const handle = rawHandle.replace(/[^a-zA-Z0-9_.@-]/g, '').slice(0, 64);
-            const pendingUserId = handle || `user-${randomHex(6)}`;
-            // MCP OAuth flow: when the client sent the user here via /oauth/authorize,
-            // a signed resume token links this Wrike consent back to the client's
-            // pending authorization.
-            const resume = typeof req.query.resume === 'string' ? req.query.resume : undefined;
+        /** Sends the user on to Wrike's own login/consent page. */
+        function redirectToWrike(res: Response, pendingUserId: string, resume?: string): void {
             const state = oauthState.issue(pendingUserId, resume);
             const params = new URLSearchParams({
                 client_id: oauthAuth.clientId,
@@ -211,6 +218,117 @@ export function createHttpApp({
             });
             if (oauthAuth.scopes.length > 0) params.set('scope', oauthAuth.scopes.join(','));
             res.redirect(302, `${WRIKE_AUTHORIZE_URL}?${params.toString()}`);
+        }
+
+        /**
+         * Refuses to hand an existing user slot to a different browser: tokens
+         * are stored by handle, so silently overwriting a slot would repoint
+         * every connection token already issued for it at the new person's
+         * Wrike account. Users re-connecting must revoke first.
+         */
+        async function handleIsTaken(handle: string): Promise<boolean> {
+            if (!handle) return false;
+            return (await authManager.listUsers()).includes(handle);
+        }
+
+        app.get('/connect', rateLimit(10), async (req, res) => {
+            // The user supplies any handle they like (or we generate one); it only
+            // labels their entry — authentication is Wrike's own login page.
+            const rawHandle = typeof req.query.user === 'string' ? req.query.user.trim() : '';
+            const handle = rawHandle.replace(/[^a-zA-Z0-9_.@-]/g, '').slice(0, 64);
+            const pendingUserId = handle || `user-${randomHex(6)}`;
+            // MCP OAuth flow: when the client sent the user here via /oauth/authorize,
+            // a signed resume token links this Wrike consent back to the client's
+            // pending authorization.
+            const resume = typeof req.query.resume === 'string' ? req.query.resume : undefined;
+
+            if (await handleIsTaken(handle)) {
+                res.status(409).type('html').send(
+                    page(
+                        'Handle already in use',
+                        `<p>The handle <code>${escapeHtml(handle)}</code> is already connected.</p>` +
+                        `<p>Pick a different handle, or revoke the existing connection first ` +
+                        `(<code>POST /revoke</code> with that connection token as the Bearer header).</p>`
+                    )
+                );
+                return;
+            }
+
+            // MCP OAuth: show who is asking before sending the user to Wrike.
+            // Without this the only consent screen is Wrike's page for THIS
+            // server's app, so a client that self-registered via open DCR and
+            // phished the authorize URL would be invisible to the user.
+            if (resume && mcpOauth) {
+                const pending = mcpOauth.describePending(resume);
+                if (!pending) {
+                    res.status(400).type('html').send(
+                        page('Link expired', '<p>This sign-in link has expired. Start again from your MCP client.</p>')
+                    );
+                    return;
+                }
+                const nonce = randomToken();
+                res.cookie(CONSENT_COOKIE, nonce, {
+                    httpOnly: true,
+                    sameSite: 'lax',
+                    secure: publicBaseUrl.startsWith('https://'),
+                    maxAge: 10 * 60 * 1000,
+                    path: '/',
+                });
+                const who = pending.clientName
+                    ? `<strong>${escapeHtml(pending.clientName)}</strong>`
+                    : '<strong>An MCP client</strong>';
+                res.type('html').send(
+                    page(
+                        'Authorize MCP client',
+                        `<p>${who} is asking to connect to your Wrike account through this server.</p>` +
+                        `<dl><dt>Client name</dt><dd>${escapeHtml(pending.clientName ?? '(not supplied)')}</dd>` +
+                        `<dt>Client ID</dt><dd><code>${escapeHtml(pending.clientId)}</code></dd>` +
+                        `<dt>Redirects to</dt><dd><code>${escapeHtml(pending.redirectUri)}</code></dd></dl>` +
+                        `<p style="color:#a33">The client name is supplied by the client and is not verified. ` +
+                        `If you did not start this from your MCP client, close this page.</p>` +
+                        `<form method="post" action="${escapeHtml(publicBaseUrl)}/connect/confirm">` +
+                        `<input type="hidden" name="resume" value="${escapeHtml(resume)}">` +
+                        `<input type="hidden" name="user" value="${escapeHtml(pendingUserId)}">` +
+                        `<input type="hidden" name="nonce" value="${escapeHtml(nonce)}">` +
+                        `<button type="submit">Continue to Wrike</button></form>`
+                    )
+                );
+                return;
+            }
+
+            redirectToWrike(res, pendingUserId, resume);
+        });
+
+        // Consent confirmation for the MCP flow. The nonce must match the
+        // cookie set when the consent screen rendered; SameSite=Lax means a
+        // cross-site auto-submitted form does not carry it, so the consent
+        // screen cannot be skipped from an attacker's page.
+        app.post('/connect/confirm', rateLimit(10), async (req, res) => {
+            const body = (req.body ?? {}) as Record<string, unknown>;
+            const resume = typeof body.resume === 'string' ? body.resume : '';
+            const nonce = typeof body.nonce === 'string' ? body.nonce : '';
+            const rawHandle = typeof body.user === 'string' ? body.user.trim() : '';
+            const handle = rawHandle.replace(/[^a-zA-Z0-9_.@-]/g, '').slice(0, 64);
+            const cookie = readCookie(req, CONSENT_COOKIE);
+
+            if (!cookie || !nonce || !timingSafeEqualStr(cookie, nonce)) {
+                res.status(403).type('html').send(
+                    page('Could not confirm', '<p>Consent could not be confirmed. Start again from your MCP client.</p>')
+                );
+                return;
+            }
+            res.clearCookie(CONSENT_COOKIE, { path: '/' });
+            if (!resume || !mcpOauth?.describePending(resume)) {
+                res.status(400).type('html').send(
+                    page('Link expired', '<p>This sign-in link has expired. Start again from your MCP client.</p>')
+                );
+                return;
+            }
+            if (await handleIsTaken(handle)) {
+                res.status(409).type('html').send(page('Handle already in use', '<p>Start again from your MCP client.</p>'));
+                return;
+            }
+            redirectToWrike(res, handle || `user-${randomHex(6)}`, resume);
         });
 
         app.get('/oauth/callback', rateLimit(10), async (req, res) => {
@@ -246,13 +364,13 @@ export function createHttpApp({
                 const connectionToken = await authManager.issueConnectionToken(userId);
                 // Connection token is shown exactly once; it is stored only as a hash.
                 res.type('html').send(
-                    `<!doctype html><html><body style="font-family:system-ui;max-width:40rem;margin:3rem auto">` +
-                    `<h2>Wrike connected</h2>` +
-                    `<p>Add this MCP server to your client with the header:</p>` +
-                    `<p><code>Authorization: Bearer <strong>${connectionToken}</strong></code></p>` +
-                    `<p style="color:#a33">This token is shown only once. Store it in your MCP client now.</p>` +
-                    `<p>User handle: <code>${escapeHtml(userId)}</code></p>` +
-                    `</body></html>`
+                    page(
+                        'Wrike connected',
+                        `<p>Add this MCP server to your client with the header:</p>` +
+                        `<p><code>Authorization: Bearer <strong>${escapeHtml(connectionToken)}</strong></code></p>` +
+                        `<p style="color:#a33">This token is shown only once. Store it in your MCP client now.</p>` +
+                        `<p>User handle: <code>${escapeHtml(userId)}</code></p>`
+                    )
                 );
             } catch (err) {
                 res.status(502).send(redact(`Token exchange failed: ${errorMessage(err)}`));
@@ -305,13 +423,58 @@ export function createHttpApp({
     return app;
 }
 
+/** User-slot suffix. Crypto RNG: Math.random is predictable across requests. */
 function randomHex(n: number): string {
-    const chars = '0123456789abcdef';
-    let out = '';
-    for (let i = 0; i < n; i++) out += chars[Math.floor(Math.random() * 16)];
-    return out;
+    return randomBytes(Math.ceil(n / 2))
+        .toString('hex')
+        .slice(0, n);
 }
 
+function randomToken(): string {
+    return randomBytes(32).toString('base64url');
+}
+
+/** Constant-time string compare for equal-length secrets (length is not secret). */
+function timingSafeEqualStr(a: string, b: string): boolean {
+    const x = Buffer.from(a);
+    const y = Buffer.from(b);
+    return x.length === y.length && timingSafeEqual(x, y);
+}
+
+function readCookie(req: Request, name: string): string | undefined {
+    const header = req.headers.cookie;
+    if (!header) return undefined;
+    for (const part of header.split(';')) {
+        const eq = part.indexOf('=');
+        if (eq < 0) continue;
+        if (part.slice(0, eq).trim() !== name) continue;
+        try {
+            return decodeURIComponent(part.slice(eq + 1).trim());
+        } catch {
+            return undefined;
+        }
+    }
+    return undefined;
+}
+
+/**
+ * HTML-escapes untrusted text. Quotes are escaped too: these values land in
+ * attribute contexts (hidden form fields) as well as element text.
+ */
 function escapeHtml(s: string): string {
-    return s.replace(/&/g, '&').replace(/</g, '<').replace(/>/g, '>');
+    return s
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+/** Minimal shared page chrome for the browser-facing endpoints. */
+function page(title: string, body: string): string {
+    return (
+        `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(title)}</title></head>` +
+        `<body style="font-family:system-ui;max-width:40rem;margin:3rem auto">` +
+        `<h2>${escapeHtml(title)}</h2>${body}</body></html>`
+    );
 }
