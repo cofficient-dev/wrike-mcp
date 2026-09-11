@@ -8,19 +8,69 @@
 #
 # Caddy serves `localhost` from its own internal CA (`tls internal`), so there
 # is no ACME round trip and no certificate to generate here.
-set -e
+#
+# SAFETY: this script must never touch a real deployment. It runs under its
+# own compose project name, so its containers and volumes are namespaced away
+# from the production project and `down -v` cannot reach the real token store.
+# It keeps its env file inside $TMP and overrides `env_file` to point there,
+# so the repository's .env is never written, read, or deleted. It also refuses
+# to run outright if this checkout looks like a live deployment.
+set -euo pipefail
 cd "$(dirname "$0")/.."
 
+PROJECT=wrike-mcp-smoke
 TMP=.smoke-proxy
-trap 'docker compose down -v >/dev/null 2>&1 || true
-      docker compose -f "$TMP/docker-compose.yml" down -v >/dev/null 2>&1 || true
-      docker network rm mcp-proxy >/dev/null 2>&1 || true
-      rm -rf "$TMP" docker-compose.override.yml .env' EXIT
 
-# Secrets for the local test only.
-node -e "require('fs').writeFileSync('.env', 'WRIKE_PAT=shared-proxy-test-pat\nWRIKE_HOST=www.wrike.com\nTOKEN_ENCRYPTION_KEY=' + 'ab'.repeat(32) + '\n')"
+# A real deployment keeps its secrets in .env and its wiring in
+# docker-compose.override.yml. Both are gitignored, so their presence means
+# this is somebody's live checkout (e.g. /opt/wrike-mcp) rather than a clean
+# working copy. Losing TOKEN_ENCRYPTION_KEY would make the encrypted token
+# store permanently undecryptable, so bail rather than risk it.
+for f in .env docker-compose.override.yml; do
+  if [ -e "$f" ]; then
+    echo "REFUSING TO RUN: $f exists, so this looks like a live deployment." >&2
+    echo "Run this from a clean checkout instead — it is a test harness, not a health check." >&2
+    exit 1
+  fi
+done
+
+cleanup() {
+  docker compose -p "$PROJECT" -f docker-compose.yml -f "$TMP/override.yml" down -v >/dev/null 2>&1 || true
+  docker compose -p "$PROJECT-proxy" -f "$TMP/proxy.yml" down -v >/dev/null 2>&1 || true
+  docker network rm mcp-proxy >/dev/null 2>&1 || true
+  rm -rf "$TMP"
+}
+trap cleanup EXIT
 
 mkdir -p "$TMP"
+
+# Test secrets live here, never in the repository root.
+printf 'WRIKE_PAT=shared-proxy-test-pat\nWRIKE_HOST=www.wrike.com\nTOKEN_ENCRYPTION_KEY=%s\n' \
+  "$(node -e "process.stdout.write('ab'.repeat(32))")" > "$TMP/.env"
+
+# Overrides the base env_file so the app reads $TMP/.env, not ./.env.
+cat > "$TMP/override.yml" <<EOF
+services:
+  wrike-mcp:
+    env_file:
+      - $TMP/.env
+    environment:
+      HOST: 0.0.0.0
+      PORT: 3000
+      TOKEN_STORE_PATH: /var/lib/wrike-mcp/tokens.json
+    expose:
+      - "3000"
+    networks:
+      - default
+      - mcp-proxy
+  caddy:
+    profiles:
+      - disabled
+networks:
+  mcp-proxy:
+    external: true
+EOF
+
 cat > "$TMP/Caddyfile" <<'EOF'
 localhost {
 	tls internal
@@ -35,11 +85,11 @@ localhost {
 	}
 }
 EOF
-cat > "$TMP/docker-compose.yml" <<'EOF'
+
+cat > "$TMP/proxy.yml" <<'EOF'
 services:
   caddy:
     image: caddy:2.8-alpine
-    container_name: mcp-proxy-caddy
     ports: ["80:80", "443:443"]
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
@@ -51,11 +101,10 @@ EOF
 
 # 1. shared network + proxy
 docker network create mcp-proxy >/dev/null 2>&1 || true
-docker compose -f "$TMP/docker-compose.yml" up -d >/dev/null
+docker compose -p "$PROJECT-proxy" -f "$TMP/proxy.yml" up -d >/dev/null
 
 # 2. this project with the shared-proxy override
-cp docker-compose.override.shared-proxy.yml.example docker-compose.override.yml
-docker compose up -d --build >/dev/null
+docker compose -p "$PROJECT" -f docker-compose.yml -f "$TMP/override.yml" up -d --build >/dev/null
 
 # 3. wait for health through the proxy
 for _ in $(seq 1 30); do
@@ -64,7 +113,7 @@ for _ in $(seq 1 30); do
 done
 
 echo "--- app containers (bundled caddy must be absent) ---"
-docker compose ps -a --format '{{.Name}} {{.State}}'
+docker compose -p "$PROJECT" -f docker-compose.yml -f "$TMP/override.yml" ps -a --format '{{.Name}} {{.State}}'
 
 echo "--- healthz via shared proxy ---"
 curl -sk https://localhost/wrike/healthz; echo
