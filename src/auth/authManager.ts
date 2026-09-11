@@ -89,8 +89,43 @@ export class AuthManager {
     /** Completes the /connect flow for a user: stores their Wrike tokens. */
     async storeUserTokens(userId: UserId, tokens: StoredUserTokens): Promise<void> {
         if (this.auth.mode !== 'oauth') throw new AuthError('storeUserTokens is only valid in oauth mode');
+        const previous = this.users.get(userId);
         this.users.set(userId, { tokens });
-        await this.store.saveUserTokens(userId, tokens);
+        try {
+            await this.store.saveUserTokens(userId, tokens);
+        } catch (err) {
+            // Keep memory and disk in step when the write fails.
+            if (previous) this.users.set(userId, previous);
+            else this.users.delete(userId);
+            throw err;
+        }
+    }
+
+    /**
+     * Claims a user slot only if it is free, returning false if it is taken.
+     *
+     * Tokens are stored by handle and storeUserTokens overwrites, so two
+     * browsers completing Wrike consent for the same handle would leave the
+     * later one's tokens under it — repointing every connection token already
+     * issued for that handle at the other person's Wrike account. The check
+     * and the claim run with no await between them, so on Node's single
+     * thread they cannot interleave.
+     */
+    async storeUserTokensIfAbsent(userId: UserId, tokens: StoredUserTokens): Promise<boolean> {
+        if (this.auth.mode !== 'oauth') throw new AuthError('storeUserTokens is only valid in oauth mode');
+        await this.loadInitial();
+        if (this.users.has(userId)) return false;
+        this.users.set(userId, { tokens });
+        try {
+            await this.store.saveUserTokens(userId, tokens);
+        } catch (err) {
+            // Nothing was persisted, so the claim must not outlive the failure:
+            // otherwise the handle reads as taken and every later /connect for
+            // it 409s until the process restarts.
+            this.users.delete(userId);
+            throw err;
+        }
+        return true;
     }
 
     /** Issues a one-time connection token for a user (persisted as hash only). */

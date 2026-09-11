@@ -157,3 +157,33 @@ describe('AuthManager OAuth mode — per-user', () => {
     expect(fetchImpl).toHaveBeenCalledTimes(2);
   });
 });
+describe('slot claim rollback', () => {
+  it('frees the handle when the write fails, instead of bricking it', async () => {
+    const { store } = makeStore();
+    const manager = new AuthManager(oauthConfig, store);
+    const save = vi.spyOn(store, 'saveUserTokens').mockRejectedValueOnce(new Error('disk full'));
+
+    await expect(manager.storeUserTokensIfAbsent('ben', tokens())).rejects.toThrow('disk full');
+    save.mockRestore();
+
+    // Nothing was persisted, so the handle must still be claimable — otherwise
+    // every later /connect for it 409s until the process restarts.
+    expect(await manager.listUsers()).toEqual([]);
+    expect(await manager.storeUserTokensIfAbsent('ben', tokens())).toBe(true);
+  });
+
+  it('restores the previous tokens when an overwrite fails', async () => {
+    const { store } = makeStore();
+    const manager = new AuthManager(oauthConfig, store);
+    await manager.storeUserTokens('ben', tokens({ at: 'FIRST' }));
+
+    const save = vi.spyOn(store, 'saveUserTokens').mockRejectedValueOnce(new Error('disk full'));
+    await expect(manager.storeUserTokens('ben', tokens({ at: 'SECOND' }))).rejects.toThrow('disk full');
+    save.mockRestore();
+
+    // Memory must not report a value that never reached disk.
+    const token = await manager.issueConnectionToken('ben');
+    expect(await manager.resolveConnectionToken(token)).toBe('ben');
+    expect((await store.getUser('ben'))?.tokens.accessToken).toBe('FIRST');
+  });
+});

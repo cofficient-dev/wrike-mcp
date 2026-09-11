@@ -14,7 +14,7 @@ comfortably runs 3–5).
 /opt/jira-mcp/                  ← ...
 ```
 
-The shared nginx routes by path or subdomain to each server on the common
+The shared proxy routes by path or subdomain to each server on the common
 `mcp-proxy` Docker network:
 
 ```
@@ -25,22 +25,147 @@ https://wrike.mcp.example.com/     → wrike-mcp:3000       (subdomain routing)
 https://github.mcp.example.com/    → github-mcp:3000
 ```
 
-### 1. Start the shared proxy (once)
+## First-time install
+
+On a fresh droplet, clone the repo first — every server in `/opt/` is a
+git clone:
 
 ```bash
+git clone <your-repo> /opt/wrike-mcp
+```
+
+Then continue below: start the proxy, attach this project, add its route.
+
+
+## Option A: Caddy proxy (automatic TLS — recommended)
+
+No certificate to buy, copy, or renew. Point DNS at the droplet, then paste
+this once — it creates `/opt/mcp-proxy` with everything and starts Caddy:
+
+```bash
+mkdir -p /opt/mcp-proxy && cd /opt/mcp-proxy
 docker network create mcp-proxy
-cd /opt/mcp-proxy                        # copy deploy/proxy/* (nginx) there
-mkdir -p certs                         # nginx only — Caddy needs no certs
-# put fullchain.pem + privkey.pem in certs/
-#   (one SAN or wildcard cert covering mcp.example.com and/or *.mcp.example.com)
+
+cat > docker-compose.yml <<'EOF'
+services:
+  caddy:
+    image: caddy:2.8-alpine
+    restart: unless-stopped
+    ports: ["80:80", "443:443"]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+    networks: [mcp-proxy]
+    deploy:
+      resources:
+        limits: { memory: 128M }
+
+networks:
+  mcp-proxy:
+    external: true
+
+volumes:
+  caddy-data:
+EOF
+
+cat > Caddyfile <<'EOF'
+{
+    email admin@example.com
+}
+mcp.example.com {
+    # RFC 8414/9728 discovery: the well-known segment comes BEFORE the issuer
+    # path, so these URLs are host-rooted and never match handle_path /wrike/*.
+    # Without them, spec-compliant MCP clients fail discovery. Keep them first.
+    handle /.well-known/oauth-authorization-server/wrike* {
+        reverse_proxy wrike-mcp:3000
+    }
+    handle /.well-known/oauth-protected-resource/wrike* {
+        reverse_proxy wrike-mcp:3000
+    }
+
+    # path routing: each MCP server gets a path prefix
+    handle_path /wrike/* {
+        reverse_proxy wrike-mcp:3000
+    }
+    # handle /.well-known/oauth-authorization-server/github* {
+    #     reverse_proxy github-mcp:3000
+    # }
+    # handle /.well-known/oauth-protected-resource/github* {
+    #     reverse_proxy github-mcp:3000
+    # }
+    # handle_path /github/* {
+    #     reverse_proxy github-mcp:3000
+    # }
+}
+EOF
+
+# Replace mcp.example.com and admin@example.com with your own:
+nano Caddyfile
+
 docker compose up -d
 ```
 
-### 2. Attach each MCP server
+That's it — the certificate is obtained and renewed automatically. The
+`caddy-data` volume stores the certs, so keep it across rebuilds.
+
+
+Users connect at `https://mcp.example.com/wrike/connect` and configure the
+MCP client URL `https://mcp.example.com/wrike/mcp`. In `.env`, set
+`WRIKE_REDIRECT_URI=https://mcp.example.com/wrike/oauth/callback` (and
+register exactly that URI in the Wrike App Console).
+
+Also set `PUBLIC_BASE_URL=https://mcp.example.com/wrike` — including the path
+prefix. The `/.well-known/*` and `/oauth/*` endpoints are mounted only when it
+is set, so without it native sign-in does not exist and clients get 404s from
+discovery with no other symptom.
+
+The Caddyfile above already carries the two host-rooted `/.well-known/` handles
+this needs. They are not optional for a path-prefixed issuer: RFC 8414 §3.1 and
+RFC 9728 §3.1 put the well-known segment *before* the issuer path, so a
+spec-compliant client fetches
+`https://mcp.example.com/.well-known/oauth-authorization-server/wrike`, which
+never matches `handle_path /wrike/*`. Drop those blocks and only the
+non-standard prefixed location is served, so strict clients fail discovery.
+
+Subdomain deployments (`https://wrike.example.com`) have an empty issuer path
+and need none of this.
+
+Then attach each MCP server (step below). Another server on the same host =
+another path block in the Caddyfile:
+
+```caddyfile
+handle_path /github/* {
+    reverse_proxy github-mcp:3000
+}
+```
+
+Wildcards (`*.mcp.example.com`) need the DNS-01 challenge — see notes in
+`deploy/caddy/docker-compose.yml`.
+
+## Option B: nginx proxy (you already have a certificate)
+
+1. Copy `deploy/proxy/*` to `/opt/mcp-proxy/`, then put `fullchain.pem` +
+   `privkey.pem` into `/opt/mcp-proxy/certs/` (one SAN or wildcard cert
+   covering your hostnames).
+
+```bash
+docker network create mcp-proxy
+cd /opt/mcp-proxy
+docker compose up -d
+```
+
+2. Add one route per server in `default.conf` — see the commented examples
+   inside it.
+3. Monthly renewal timer: certbot renew → copy certs into `certs/` →
+   `docker compose restart proxy`.
+
+## Attach each MCP server
 
 In this project:
 
 ```bash
+cd /opt/wrike-mcp                          # cloned in "First-time install" above
+git pull                                   # on updates
 cp docker-compose.override.shared-proxy.yml.example docker-compose.override.yml
 docker compose up -d --build
 ```
@@ -49,99 +174,6 @@ The override disables this project's own nginx and attaches the app container
 to the shared `mcp-proxy` network. For **every other** MCP server you add,
 repeat the same pattern: no bundled proxy, join `mcp-proxy`, publish nothing.
 
-### 3. Add a route in the proxy config
-
-One `location` block (or subdomain `server` block) per server — see
-`deploy/proxy/default.conf` for a commented example.
-
-### Caddy alternative (automatic TLS — no certbot)
-
-If you don't already have a certificate, Caddy is the simpler option: it
-obtains and renews Let's Encrypt certificates automatically.
-
-1. Copy `deploy/caddy/*` to `/opt/mcp-proxy/` (instead of `deploy/proxy/*`).
-   That directory ends up with two files — `docker-compose.yml`:
-
-```yaml
-services:
-  caddy:
-    image: caddy:2.8-alpine
-    container_name: mcp-proxy-caddy
-    restart: unless-stopped
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy-data:/data       # TLS certs + ACME account keys
-      - caddy-config:/config
-    networks:
-      - mcp-proxy
-    deploy:
-      resources:
-        limits:
-          memory: 128M
-
-networks:
-  mcp-proxy:
-    external: true
-
-volumes:
-  caddy-data:
-  caddy-config:
-```
-
-   …and `Caddyfile` (full contents in step 4 below).
-2. Edit `/opt/mcp-proxy/Caddyfile`: replace `mcp.example.com` with your
-   hostname and `admin@example.com` with your email.
-3. Start the proxy:
-
-```bash
-docker network create mcp-proxy
-cd /opt/mcp-proxy
-docker compose up -d
-```
-
-4. Continue with step 2 above to attach each MCP server. Add one route per
-   server in the Caddyfile (instead of `default.conf`) — examples are
-   commented inside it. The full configuration:
-
-```caddyfile
-{
-	# Required for ACME account creation and expiry notices.
-	email admin@example.com
-}
-
-mcp.example.com {
-	header {
-		X-Content-Type-Options nosniff
-		Referrer-Policy no-referrer
-		-Server
-	}
-
-	request_body {
-		max_size 60MB
-	}
-
-	# reverse_proxy is streaming-friendly by default (no buffering, no
-	# read/write timeouts on streamed responses).
-	reverse_proxy wrike-mcp:3000
-
-	# Another MCP server by path:
-	# handle_path /github/* {
-	#     reverse_proxy github-mcp:3000
-	# }
-	#
-	# Or by subdomain (one cert per name, obtained automatically):
-	# github.mcp.example.com {
-	#     reverse_proxy github-mcp:3000
-	# }
-}
-```
-
-Wildcard certs (`*.mcp.example.com`) need the DNS-01 challenge — see the
-notes in `deploy/caddy/docker-compose.yml`.
-
 ## Rules that keep this safe and simple
 
 - **Unique `TOKEN_ENCRYPTION_KEY` per project** — independent compromise isolation; a leaked key for one service never exposes another's token store.
@@ -149,7 +181,7 @@ notes in `deploy/caddy/docker-compose.yml`.
 - **Nothing else publishes ports** — only the proxy has `ports:`; every app uses `expose:` on the shared network. No accidental direct exposure.
 - **Per-service users** — each MCP server has its own per-user auth; users connect to each service separately (there is no cross-server SSO in the MCP ecosystem today). A user connecting to Wrike MCP and GitHub MCP holds two unrelated connection tokens.
 - **Memory budget** — proxy ~128 MB + ~100–200 MB per MCP server; size the droplet accordingly (2 GB ≈ proxy + 4–5 servers comfortably).
-- **Renewals (nginx variant)** — certbot renewal copies new certs into `/opt/mcp-proxy/certs/` and runs `docker compose restart proxy` (monthly timer) — one cert to renew regardless of how many servers sit behind it. The Caddy variant renews automatically; nothing to do.
+- **Renewals** — Caddy renews automatically; the nginx variant needs the certbot copy + restart timer from its section.
 
 ## Updating one server without touching the others
 
