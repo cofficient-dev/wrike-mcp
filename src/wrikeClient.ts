@@ -139,6 +139,59 @@ export class WrikeClient {
     return json as WrikeResponse<T>;
   }
 
+  /**
+   * Fetches a binary body (attachment content) rather than JSON.
+   *
+   * Every other call funnels through res.json(); GET /attachments/{id}/download
+   * answers application/octet-stream, so parsing it as JSON would throw and the
+   * bytes would be lost. Errors still come back as JSON, so those are decoded
+   * on the failure path exactly as elsewhere.
+   */
+  async getBinary(
+    path: string,
+    params: QueryParams = {},
+    attempt = 0
+  ): Promise<{ data: Buffer; contentType: string; filename?: string }> {
+    const host = await this.authManager.getHost(this.userId);
+    const token = await this.authManager.getAccessToken(this.userId);
+    const url = new URL(`https://${host}/api/v4${path}`);
+    for (const [k, v] of Object.entries(params)) {
+      if (v !== undefined) url.searchParams.set(k, String(v));
+    }
+    const res = await this.fetchImpl(url.toString(), {
+      method: 'GET',
+      headers: { Authorization: `bearer ${token}`, Accept: '*/*' },
+    });
+
+    // Same recovery as doRequest: a stale access token, then rate limiting.
+    if (!res.ok && res.status === 401 && attempt === 0 && this.authManager.authMode === 'oauth') {
+      await this.authManager.refresh(this.userId);
+      return this.getBinary(path, params, 1);
+    }
+    if (!res.ok && res.status === 429 && attempt < 2) {
+      const retryAfterMs = Number(res.headers.get('Retry-After') ?? 0) || (attempt + 1) * 1000;
+      await new Promise((r) => setTimeout(r, retryAfterMs));
+      return this.getBinary(path, params, attempt + 1);
+    }
+    if (!res.ok) {
+      const err = (await res.json().catch(() => ({}))) as WrikeErrorResponse;
+      throw new WrikeApiError(
+        res.status,
+        err.error ?? 'unknown_error',
+        `Wrike API error ${res.status} (${err.error ?? 'unknown_error'}): ${err.errorDescription ?? res.statusText}`
+      );
+    }
+
+    const data = Buffer.from(await res.arrayBuffer());
+    const disposition = res.headers.get('Content-Disposition') ?? '';
+    const match = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(disposition);
+    return {
+      data,
+      contentType: res.headers.get('Content-Type') ?? 'application/octet-stream',
+      ...(match?.[1] ? { filename: decodeURIComponent(match[1]) } : {}),
+    };
+  }
+
   // --- Convenience wrappers ---------------------------------------------------
 
   get<T>(path: string, params: QueryParams = {}): Promise<WrikeResponse<T>> {

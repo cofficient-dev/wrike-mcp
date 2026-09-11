@@ -144,3 +144,62 @@ describe('WrikeClient (per-user)', () => {
     expect(init.body).toBeInstanceOf(FormData);
   });
 });
+describe('WrikeClient.getBinary', () => {
+  it('returns raw bytes, content type and filename', async () => {
+    const manager = new AuthManager(patConfig, store);
+    const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a]);
+    const fetchImpl = vi.fn().mockResolvedValue(
+      new Response(new Uint8Array(bytes), {
+        status: 200,
+        headers: {
+          'Content-Type': 'image/png',
+          'Content-Disposition': 'attachment; filename="Image-2025.png"',
+        },
+      })
+    );
+    const client = new WrikeClient(manager, AuthManager.PAT_USER_ID, fetchImpl as unknown as typeof fetch);
+
+    const out = await client.getBinary('/attachments/IEAGIITRIMFWG6YH/download');
+    expect(out.data.equals(bytes)).toBe(true);
+    expect(out.contentType).toBe('image/png');
+    expect(out.filename).toBe('Image-2025.png');
+    // Binary body must not be parsed as JSON — that was the reason download
+    // could not be supported through the normal request path.
+    const [url, init] = fetchImpl.mock.calls[0];
+    expect(url).toBe('https://www.wrike.com/api/v4/attachments/IEAGIITRIMFWG6YH/download');
+    expect((init.headers as Record<string, string>).Authorization).toBe('bearer PAT-TOKEN');
+  });
+
+  it('surfaces a JSON error body as WrikeApiError', async () => {
+    const manager = new AuthManager(patConfig, store);
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValue(jsonResponse(404, { error: 'not_found', errorDescription: 'Attachment not found' }));
+    const client = new WrikeClient(manager, AuthManager.PAT_USER_ID, fetchImpl as unknown as typeof fetch);
+
+    await expect(client.getBinary('/attachments/IEAGIITRIMFWG6YH/download')).rejects.toThrow(WrikeApiError);
+  });
+
+  it('refreshes once on 401 and retries', async () => {
+    // Token refresh goes through the AuthManager's own fetch, not the client's.
+    const refreshFetch = vi.fn().mockResolvedValue(
+      jsonResponse(200, { access_token: 'AT2', refresh_token: 'RT2', token_type: 'bearer', expires_in: 3600 })
+    );
+    let first = true;
+    const fetchImpl = vi.fn().mockImplementation(() => {
+      if (first) {
+        first = false;
+        return Promise.resolve(jsonResponse(401, { error: 'not_authorized', errorDescription: 'stale' }));
+      }
+      return Promise.resolve(new Response(new Uint8Array(Buffer.from('OK')), { status: 200 }));
+    });
+    const mgr = new AuthManager(oauthConfig, store, Date.now, refreshFetch as unknown as typeof fetch);
+    await mgr.storeUserTokens('dl-user', tokens());
+    const client = new WrikeClient(mgr, 'dl-user', fetchImpl as unknown as typeof fetch);
+
+    const out = await client.getBinary('/attachments/IEAGIITRIMFWG6YH/download');
+    expect(out.data.toString()).toBe('OK');
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(refreshFetch).toHaveBeenCalledTimes(1);
+  });
+});

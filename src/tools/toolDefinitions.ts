@@ -30,6 +30,13 @@ function def<T extends AnySchema>(
 }
 
 /** Serializes array/object query values the Wrike API expects (JSON in query string). */
+/**
+ * Ceiling on an attachment returned inline. Base64 inflates by ~33% and the
+ * result is carried in the MCP response, so a large file would swamp the
+ * client. Past this, list_attachments + withUrls hands back a 24h URL instead.
+ */
+const MAX_INLINE_DOWNLOAD_BYTES = 5 * 1024 * 1024;
+
 function query(params: Record<string, unknown>): Record<string, string | number | boolean | undefined> {
     const out: Record<string, string | number | boolean | undefined> = {};
     for (const [k, v] of Object.entries(params)) {
@@ -181,11 +188,44 @@ export function buildTools(): ToolDefinition[] {
                 );
             }
         ),
-        def('list_attachments', 'List attachments on a task or folder.', S.ListAttachmentsSchema, (c, p) =>
-            c.get(`/${p.targetType}/${p.targetId}/attachments`, query({ withUrl: p.withUrl, fields: p.fields }))
+        def(
+            'list_attachments',
+            'List attachments on a task or folder. Set withUrls for a download URL valid 24h.',
+            S.ListAttachmentsSchema,
+            (c, p) =>
+                c.get(
+                    `/${p.targetType}/${p.targetId}/attachments`,
+                    // Wrike's parameter is `withUrls` (plural); `fields` is not
+                    // supported on this endpoint and was rejected when sent.
+                    query({ withUrls: p.withUrls, versions: p.versions })
+                )
         ),
-        def('get_attachment', 'Get an attachment by ID (metadata; optionally a short-lived download URL).', S.GetAttachmentSchema, (c, p) =>
-            c.get(`/attachments/${p.attachmentId}`, query({ withUrl: p.withUrl }))
+        def(
+            'get_attachment',
+            'Get an attachment by ID. Metadata by default; set download for the file content, base64-encoded.',
+            S.GetAttachmentSchema,
+            async (c, p) => {
+                if (!p.download) {
+                    // GET /attachments/{ids} takes a comma-separated list and
+                    // supports only `versions` — no URL-bearing parameter.
+                    return c.get(`/attachments/${p.attachmentId}`, query({ versions: p.versions }));
+                }
+                const file = await c.getBinary(`/attachments/${p.attachmentId}/download`);
+                if (file.data.byteLength > MAX_INLINE_DOWNLOAD_BYTES) {
+                    throw new Error(
+                        `Attachment is ${file.data.byteLength} bytes, over the ${MAX_INLINE_DOWNLOAD_BYTES}-byte inline limit. ` +
+                        `Use list_attachments with withUrls to get a download URL valid for 24 hours instead.`
+                    );
+                }
+                return {
+                    attachmentId: p.attachmentId,
+                    contentType: file.contentType,
+                    ...(file.filename ? { filename: file.filename } : {}),
+                    size: file.data.byteLength,
+                    encoding: 'base64',
+                    content: file.data.toString('base64'),
+                };
+            }
         ),
         def('delete_attachment', 'Delete an attachment.', S.DeleteAttachmentSchema, (c, p) =>
             c.delete(`/attachments/${p.attachmentId}`)
