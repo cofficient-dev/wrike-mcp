@@ -24,6 +24,60 @@ export class WrikeApiError extends Error {
   }
 }
 
+/** A binary download exceeded the caller's byte budget. */
+export class BinaryTooLargeError extends Error {
+  constructor(
+    public readonly actualBytes: number,
+    public readonly maxBytes: number
+  ) {
+    super(`response is ${actualBytes} bytes, over the ${maxBytes}-byte limit`);
+    this.name = 'BinaryTooLargeError';
+  }
+}
+
+/**
+ * Reads a Response body into a Buffer, aborting once `maxBytes` is exceeded.
+ *
+ * A declared Content-Length can be checked before this runs, but Wrike (or
+ * any proxy in front of it) is not obliged to send one — chunked transfer
+ * encoding has none — so the only reliable enforcement is counting bytes as
+ * they arrive and cancelling the stream the moment the budget is blown,
+ * rather than buffering the whole body first and measuring it afterwards.
+ */
+async function readBodyWithLimit(res: Response, maxBytes?: number): Promise<Buffer> {
+  if (maxBytes === undefined || !res.body) {
+    return Buffer.from(await res.arrayBuffer());
+  }
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel().catch(() => undefined);
+      throw new BinaryTooLargeError(total, maxBytes);
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks);
+}
+
+/**
+ * Decodes a Content-Disposition filename, tolerating a bare '%' that is not
+ * valid percent-encoding (e.g. "50% off.pdf"). decodeURIComponent throws a
+ * URIError on that input, which would otherwise turn an already-successful
+ * download into a failed request over a detail as small as the file's name.
+ */
+function decodeFilename(raw: string): string {
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
+}
+
 export interface QueryParams {
   [key: string]: string | number | boolean | undefined;
 }
@@ -150,7 +204,8 @@ export class WrikeClient {
   async getBinary(
     path: string,
     params: QueryParams = {},
-    attempt = 0
+    attempt = 0,
+    maxBytes?: number
   ): Promise<{ data: Buffer; contentType: string; filename?: string }> {
     const host = await this.authManager.getHost(this.userId);
     const token = await this.authManager.getAccessToken(this.userId);
@@ -166,12 +221,12 @@ export class WrikeClient {
     // Same recovery as doRequest: a stale access token, then rate limiting.
     if (!res.ok && res.status === 401 && attempt === 0 && this.authManager.authMode === 'oauth') {
       await this.authManager.refresh(this.userId);
-      return this.getBinary(path, params, 1);
+      return this.getBinary(path, params, 1, maxBytes);
     }
     if (!res.ok && res.status === 429 && attempt < 2) {
       const retryAfterMs = Number(res.headers.get('Retry-After') ?? 0) || (attempt + 1) * 1000;
       await new Promise((r) => setTimeout(r, retryAfterMs));
-      return this.getBinary(path, params, attempt + 1);
+      return this.getBinary(path, params, attempt + 1, maxBytes);
     }
     if (!res.ok) {
       const err = (await res.json().catch(() => ({}))) as WrikeErrorResponse;
@@ -182,13 +237,24 @@ export class WrikeClient {
       );
     }
 
-    const data = Buffer.from(await res.arrayBuffer());
+    // Declared length check: rejects an oversized file before reading a
+    // single byte of the body, when Wrike sends Content-Length (it does for
+    // this endpoint). This alone is not sufficient — a chunked or lying
+    // response has no reliable Content-Length — so it is paired with the
+    // streamed budget below rather than replacing it.
+    const declaredLength = Number(res.headers.get('Content-Length') ?? '');
+    if (maxBytes !== undefined && Number.isFinite(declaredLength) && declaredLength > maxBytes) {
+      await res.body?.cancel().catch(() => undefined);
+      throw new BinaryTooLargeError(declaredLength, maxBytes);
+    }
+
+    const data = await readBodyWithLimit(res, maxBytes);
     const disposition = res.headers.get('Content-Disposition') ?? '';
     const match = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(disposition);
     return {
       data,
       contentType: res.headers.get('Content-Type') ?? 'application/octet-stream',
-      ...(match?.[1] ? { filename: decodeURIComponent(match[1]) } : {}),
+      ...(match?.[1] ? { filename: decodeFilename(match[1]) } : {}),
     };
   }
 

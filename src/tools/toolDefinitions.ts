@@ -1,4 +1,5 @@
 import type { WrikeClient } from '../wrikeClient.js';
+import { BinaryTooLargeError } from '../wrikeClient.js';
 import * as S from './schemas.js';
 import { z } from 'zod';
 
@@ -210,12 +211,21 @@ export function buildTools(): ToolDefinition[] {
                     // supports only `versions` — no URL-bearing parameter.
                     return c.get(`/attachments/${p.attachmentId}`, query({ versions: p.versions }));
                 }
-                const file = await c.getBinary(`/attachments/${p.attachmentId}/download`);
-                if (file.data.byteLength > MAX_INLINE_DOWNLOAD_BYTES) {
-                    throw new Error(
-                        `Attachment is ${file.data.byteLength} bytes, over the ${MAX_INLINE_DOWNLOAD_BYTES}-byte inline limit. ` +
-                        `Use list_attachments with withUrls to get a download URL valid for 24 hours instead.`
-                    );
+                // The byte budget is enforced inside getBinary (Content-Length
+                // check, then a streamed cutoff) rather than measured after the
+                // fact — a 100MB attachment must not be fully buffered before
+                // this limit has a chance to reject it.
+                let file;
+                try {
+                    file = await c.getBinary(`/attachments/${p.attachmentId}/download`, {}, 0, MAX_INLINE_DOWNLOAD_BYTES);
+                } catch (err) {
+                    if (err instanceof BinaryTooLargeError) {
+                        throw new Error(
+                            `Attachment is over the ${MAX_INLINE_DOWNLOAD_BYTES}-byte inline limit. ` +
+                            `Use list_attachments with withUrls to get a download URL valid for 24 hours instead.`
+                        );
+                    }
+                    throw err;
                 }
                 return {
                     attachmentId: p.attachmentId,

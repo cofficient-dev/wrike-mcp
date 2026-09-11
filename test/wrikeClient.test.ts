@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { WrikeClient, WrikeApiError } from '../src/wrikeClient.js';
+import { WrikeClient, WrikeApiError, BinaryTooLargeError } from '../src/wrikeClient.js';
 import { AuthManager } from '../src/auth/authManager.js';
 import { EncryptedTokenStore } from '../src/secrets/tokenStore.js';
 import type { OAuthConfig, PatConfig } from '../src/config.js';
@@ -201,5 +201,96 @@ describe('WrikeClient.getBinary', () => {
     expect(out.data.toString()).toBe('OK');
     expect(fetchImpl).toHaveBeenCalledTimes(2);
     expect(refreshFetch).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('WrikeClient.getBinary size limit', () => {
+  it('rejects on Content-Length without draining the body', async () => {
+    const manager = new AuthManager(patConfig, store);
+    // An effectively unbounded body: pull() never closes the stream. A
+    // ReadableStream source is allowed to call pull() once on its own, to
+    // prime its internal queue, regardless of whether anything reads from
+    // it — that is normal WHATWG streams behavior, not something this test
+    // should assert against. What must not happen is draining this stream
+    // to find its end, which is what proves the Content-Length check ran
+    // instead of falling through to the streamed reader loop.
+    let pullCount = 0;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pullCount += 1;
+        controller.enqueue(new Uint8Array(1024));
+      },
+    });
+    const fetchImpl = vi.fn().mockResolvedValue(
+      new Response(body, {
+        status: 200,
+        headers: { 'Content-Type': 'application/pdf', 'Content-Length': String(6 * 1024 * 1024) },
+      })
+    );
+    const client = new WrikeClient(manager, AuthManager.PAT_USER_ID, fetchImpl as unknown as typeof fetch);
+
+    await expect(
+      client.getBinary('/attachments/IEAGIITRIMFWG6YH/download', {}, 0, 5 * 1024 * 1024)
+    ).rejects.toThrow(BinaryTooLargeError);
+    // A stream with no queuing strategy override buffers only a handful of
+    // chunks ahead of the reader on its own; reading it to find the (never
+    // arriving) end would pull far more than that.
+    expect(pullCount).toBeLessThan(5);
+  });
+
+  it('aborts a chunked (no Content-Length) body once the streamed budget is exceeded', async () => {
+    const manager = new AuthManager(patConfig, store);
+    let chunksSent = 0;
+    const chunkSize = 1024 * 1024; // 1MB per chunk, 5MB budget below
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        chunksSent += 1;
+        controller.enqueue(new Uint8Array(chunkSize));
+        // An unbounded/lying server: never signals done on its own.
+        if (chunksSent > 8) controller.close();
+      },
+    });
+    const fetchImpl = vi.fn().mockResolvedValue(
+      new Response(body, { status: 200, headers: { 'Content-Type': 'application/octet-stream' } })
+    );
+    const client = new WrikeClient(manager, AuthManager.PAT_USER_ID, fetchImpl as unknown as typeof fetch);
+
+    await expect(
+      client.getBinary('/attachments/IEAGIITRIMFWG6YH/download', {}, 0, 5 * chunkSize)
+    ).rejects.toThrow(BinaryTooLargeError);
+    // Must not have been made to read every chunk of an 8MB+ body to notice
+    // it exceeded a 5MB budget.
+    expect(chunksSent).toBeLessThan(8);
+  });
+
+  it('succeeds when the body is under the budget', async () => {
+    const manager = new AuthManager(patConfig, store);
+    const bytes = Buffer.from('small file');
+    const fetchImpl = vi.fn().mockResolvedValue(
+      new Response(new Uint8Array(bytes), { status: 200, headers: { 'Content-Type': 'text/plain' } })
+    );
+    const client = new WrikeClient(manager, AuthManager.PAT_USER_ID, fetchImpl as unknown as typeof fetch);
+
+    const out = await client.getBinary('/attachments/IEAGIITRIMFWG6YH/download', {}, 0, 1024);
+    expect(out.data.equals(bytes)).toBe(true);
+  });
+
+  it('tolerates a filename with a bare percent that is not valid percent-encoding', async () => {
+    const manager = new AuthManager(patConfig, store);
+    const fetchImpl = vi.fn().mockResolvedValue(
+      new Response(new Uint8Array(Buffer.from('x')), {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/pdf',
+          // decodeURIComponent('50% off.pdf') throws URIError — the '%' is
+          // not followed by two hex digits.
+          'Content-Disposition': 'attachment; filename="50% off.pdf"',
+        },
+      })
+    );
+    const client = new WrikeClient(manager, AuthManager.PAT_USER_ID, fetchImpl as unknown as typeof fetch);
+
+    const out = await client.getBinary('/attachments/IEAGIITRIMFWG6YH/download');
+    expect(out.filename).toBe('50% off.pdf');
   });
 });

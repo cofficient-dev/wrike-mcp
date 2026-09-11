@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { buildTools } from '../src/tools/toolDefinitions.js';
+import { BinaryTooLargeError } from '../src/wrikeClient.js';
 import type { WrikeClient } from '../src/wrikeClient.js';
 
 function mockClient() {
@@ -207,15 +208,32 @@ describe('attachment download', () => {
     expect(result.size).toBe(8);
   });
 
-  it('get_attachment refuses an oversized inline download and names the alternative', async () => {
+  it('get_attachment passes a byte budget to getBinary so oversized files are rejected before buffering', async () => {
     const client = mockClient();
-    (client.getBinary as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
-      data: Buffer.alloc(6 * 1024 * 1024),
-      contentType: 'application/pdf',
-    });
+    await byName('get_attachment').handler(client, { attachmentId: 'IEAGIITRIMFWG6YH', download: true });
+    const call = (client.getBinary as ReturnType<typeof vi.fn>).mock.calls[0];
+    // Enforcement lives inside getBinary (Content-Length check, then a
+    // streamed cutoff) precisely so an oversized body is never fully
+    // buffered here first — the handler only supplies the budget.
+    expect(call[3]).toBeGreaterThan(0);
+  });
+
+  it('get_attachment turns BinaryTooLargeError into a message naming the alternative', async () => {
+    const client = mockClient();
+    (client.getBinary as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new BinaryTooLargeError(6 * 1024 * 1024, 5 * 1024 * 1024)
+    );
     await expect(
       byName('get_attachment').handler(client, { attachmentId: 'IEAGIITRIMFWG6YH', download: true })
     ).rejects.toThrow(/withUrls/);
+  });
+
+  it('get_attachment lets a non-size error from getBinary pass through unchanged', async () => {
+    const client = mockClient();
+    (client.getBinary as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('network blip'));
+    await expect(
+      byName('get_attachment').handler(client, { attachmentId: 'IEAGIITRIMFWG6YH', download: true })
+    ).rejects.toThrow('network blip');
   });
 
   it('get_attachment rejects the removed withUrl parameter', async () => {
