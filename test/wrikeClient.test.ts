@@ -367,3 +367,47 @@ describe('WrikeClient.getBinary size limit', () => {
     expect(out.filename).toBe('50% off.pdf');
   });
 });
+
+describe('Content-Disposition filename forms', () => {
+  const withDisposition = (value: string) => async () => {
+    const manager = new AuthManager(patConfig, store);
+    const fetchImpl = vi.fn().mockResolvedValue(
+      new Response(new Uint8Array(Buffer.from('x')), {
+        status: 200,
+        headers: { 'Content-Type': 'application/pdf', 'Content-Disposition': value },
+      })
+    );
+    const client = new WrikeClient(manager, AuthManager.PAT_USER_ID, fetchImpl as unknown as typeof fetch);
+    return client.getBinary('/attachments/IEAGIITRIMFWG6YH/download');
+  };
+
+  it('strips a non-UTF-8 charset prefix (RFC 5987)', async () => {
+    const out = await withDisposition("attachment; filename*=iso-8859-1''na%EFve.pdf")();
+    // The charset prefix must not leak into the name; %EF is not valid UTF-8
+    // percent-encoding, so the safe fallback keeps the raw remainder.
+    expect(out.filename).toBe('na%EFve.pdf');
+  });
+
+  it('prefers the ext-value form when both are present', async () => {
+    const out = await withDisposition(
+      'attachment; filename="fallback.pdf"; filename*=UTF-8\'\'real%20name.pdf'
+    )();
+    expect(out.filename).toBe('real name.pdf');
+  });
+
+  it('handles an optional language tag in the ext-value', async () => {
+    const out = await withDisposition("attachment; filename*=UTF-8'en'report.pdf")();
+    expect(out.filename).toBe('report.pdf');
+  });
+
+  it('keeps a quoted name containing a semicolon intact', async () => {
+    const out = await withDisposition('attachment; filename="draft; v2.pdf"')();
+    expect(out.filename).toBe('draft; v2.pdf');
+  });
+
+  it('takes the quoted-string form verbatim, without percent-decoding', async () => {
+    const out = await withDisposition('attachment; filename="100% done.pdf"')();
+    // RFC 6266: quoted-string is literal; decoding would corrupt the name.
+    expect(out.filename).toBe('100% done.pdf');
+  });
+});

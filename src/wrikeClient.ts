@@ -78,6 +78,32 @@ function decodeFilename(raw: string): string {
   }
 }
 
+/**
+ * Extracts the filename from a Content-Disposition header.
+ *
+ * RFC 6266 defines two forms, and senders may emit both (ext-value preferred):
+ *   filename*=UTF-8''report%20v2.pdf   ext-value: charset, optional language,
+ *                                      then percent-encoded (RFC 5987)
+ *   filename="50% off.pdf"              quoted-string: literal, NOT encoded
+ *   filename=report.pdf                 token: literal
+ *
+ * The charset prefix is skipped whatever it names — RFC 5987 permits more
+ * than UTF-8 (iso-8859-1 and friends), so matching UTF-8 alone left the
+ * prefix in the captured value. The bytes are percent-decoded regardless of
+ * the declared charset; a single-byte charset whose encoding is not valid
+ * UTF-8 falls back to the raw text via decodeFilename. The quoted-string form
+ * is taken verbatim — decoding it would corrupt names like "50% off.pdf" —
+ * and may contain ';' without being truncated.
+ */
+function dispositionFilename(disposition: string): string | undefined {
+  const ext = /filename\*=\s*[a-z0-9-]*'[^']*'([^;\s]+)/i.exec(disposition);
+  if (ext?.[1]) return decodeFilename(ext[1]);
+  const quoted = /filename=\s*"((?:[^"\\]|\\.)*)"/i.exec(disposition);
+  if (quoted?.[1]) return quoted[1].replace(/\\"/g, '"');
+  const token = /filename=\s*([^;\s]+)/i.exec(disposition);
+  return token?.[1] || undefined;
+}
+
 export interface QueryParams {
   [key: string]: string | number | boolean | undefined;
 }
@@ -261,12 +287,11 @@ export class WrikeClient {
     }
 
     const data = await readBodyWithLimit(res, maxBytes);
-    const disposition = res.headers.get('Content-Disposition') ?? '';
-    const match = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(disposition);
+    const filename = dispositionFilename(res.headers.get('Content-Disposition') ?? '');
     return {
       data,
       contentType: res.headers.get('Content-Type') ?? 'application/octet-stream',
-      ...(match?.[1] ? { filename: decodeFilename(match[1]) } : {}),
+      ...(filename !== undefined ? { filename } : {}),
     };
   }
 
