@@ -30,7 +30,6 @@ function def<T extends AnySchema>(
     };
 }
 
-/** Serializes array/object query values the Wrike API expects (JSON in query string). */
 /**
  * Ceiling on an attachment returned inline. Base64 inflates by ~33% and the
  * result is carried in the MCP response, so a large file would swamp the
@@ -38,6 +37,7 @@ function def<T extends AnySchema>(
  */
 const MAX_INLINE_DOWNLOAD_BYTES = 5 * 1024 * 1024;
 
+/** Serializes array/object query values the Wrike API expects (JSON in query string). */
 function query(params: Record<string, unknown>): Record<string, string | number | boolean | undefined> {
     const out: Record<string, string | number | boolean | undefined> = {};
     for (const [k, v] of Object.entries(params)) {
