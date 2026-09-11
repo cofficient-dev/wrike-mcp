@@ -9,11 +9,20 @@ import type { SessionManager } from './transport.js';
 
 /**
  * Web-exposed endpoints:
- *   GET  /healthz         — liveness
- *   GET  /connect         — start per-user Wrike OAuth (oauth mode)
- *   GET  /oauth/callback  — code exchange; issues the user's connection token (oauth mode)
- *   POST /revoke          — user removes their own connection
- *   ALL  /mcp             — MCP Streamable HTTP (requires Bearer connection token)
+ *   GET  /healthz              — liveness
+ *   GET  /connect              — start per-user Wrike OAuth (oauth mode)
+ *   POST /connect/confirm      — MCP consent screen confirmation (nonce-bound)
+ *   GET  /oauth/callback       — code exchange; issues the user's connection token (oauth mode)
+ *   POST /revoke               — user removes their own connection
+ *   ALL  /mcp                  — MCP Streamable HTTP (requires Bearer connection token)
+ *
+ * MCP-native OAuth (oauth mode with PUBLIC_BASE_URL set):
+ *   GET  /.well-known/oauth-protected-resource[/<issuer path>]
+ *   GET  /.well-known/oauth-authorization-server[/<issuer path>]
+ *   POST /oauth/register       — dynamic client registration (RFC 7591)
+ *   GET  /oauth/authorize      — authorization endpoint (S256 PKCE required)
+ *   POST /oauth/token          — code + verifier -> connection token
+ *   POST /oauth/revoke-token   — RFC 7009 revocation
  *
  * Security properties:
  *  - Each user authorizes with their OWN Wrike account; the server stores

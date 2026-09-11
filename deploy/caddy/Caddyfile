@@ -1,7 +1,6 @@
-# Shared Caddy proxy: routes https://<host>/ to multiple MCP servers.
-# Certificates are obtained/renewed automatically by Caddy (ACME/Let's
-# Encrypt). Add one block (or subdomain block) per MCP server; service names
-# are resolvable on the mcp-proxy network.
+# Shared Caddy proxy: one host, one path per MCP server.
+# Certificates are obtained and renewed automatically by Caddy (ACME/Let's
+# Encrypt). Service names are resolvable on the mcp-proxy network.
 
 {
 	# Required for ACME account creation and expiry notices.
@@ -9,33 +8,55 @@
 }
 
 mcp.example.com {
-	# Security headers (mirrors the nginx variant).
 	header {
 		X-Content-Type-Options nosniff
 		Referrer-Policy no-referrer
 		-Server
 	}
 
-	# 60 MB request body limit (matches the nginx variant).
+	# 60 MB request body limit (headroom over the app's own 50 MB).
 	request_body {
 		max_size 60MB
 	}
 
 	# --- Wrike MCP (this project) -------------------------------------------
+	# RFC 8414 §3.1 / RFC 9728 §3.1 put the well-known segment BEFORE the
+	# issuer path, so a spec-compliant client fetches
+	# https://mcp.example.com/.well-known/oauth-authorization-server/wrike —
+	# host-rooted, and therefore never matched by handle_path /wrike/*.
+	# Without these two handles, strict MCP clients fail discovery. Keep them
+	# ahead of the prefix block.
+	handle /.well-known/oauth-authorization-server/wrike* {
+		reverse_proxy wrike-mcp:3000
+	}
+	handle /.well-known/oauth-protected-resource/wrike* {
+		reverse_proxy wrike-mcp:3000
+	}
+
 	# reverse_proxy is streaming-friendly by default (no buffering, no
 	# read/write timeouts on streamed responses).
-	reverse_proxy wrike-mcp:3000
+	handle_path /wrike/* {
+		reverse_proxy wrike-mcp:3000
+	}
 
-	# --- Example: another MCP server by path --------------------------------
+	# --- Example: another MCP server ----------------------------------------
+	# Each server needs its own discovery handles as well as its path block.
+	# handle /.well-known/oauth-authorization-server/github* {
+	#     reverse_proxy github-mcp:3000
+	# }
+	# handle /.well-known/oauth-protected-resource/github* {
+	#     reverse_proxy github-mcp:3000
+	# }
 	# handle_path /github/* {
 	#     reverse_proxy github-mcp:3000
 	# }
-	#
-	# Alternatively route by subdomain instead of path:
-	# github.mcp.example.com {
-	#     reverse_proxy github-mcp:3000
-	# }
-	# (Subdomain routing needs a wildcard cert — see the compose file note
-	#  about DNS-01, or just list each subdomain; Caddy gets one cert per
-	#  name automatically.)
 }
+
+# Alternatively route by subdomain instead of path. An MCP server on its own
+# hostname has an empty issuer path, so it needs none of the well-known
+# handles above. Caddy gets a certificate per name automatically; a wildcard
+# (*.mcp.example.com) needs the DNS-01 challenge — see the compose file note.
+#
+# github.mcp.example.com {
+#     reverse_proxy github-mcp:3000
+# }

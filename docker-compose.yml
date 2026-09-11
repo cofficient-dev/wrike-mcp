@@ -1,13 +1,19 @@
-# Wrike MCP server + nginx (TLS) reverse proxy.
+# Wrike MCP server + Caddy (automatic TLS) reverse proxy.
 #
 # Usage:
-#   1. Point a DNS A record at the droplet (e.g. wrike.example.com).
-#   2. Obtain certs (see README "TLS certificates"): put fullchain.pem + privkey.pem
-#      into ./certs/ (gitignored — never commit keys).
-#   3. Put app credentials into .env (copy from .env.example).
+#   1. Point a DNS A record at the host (e.g. wrike.example.com).
+#   2. Put app credentials into .env (copy from .env.example).
+#   3. Set the hostname and ACME email in Caddyfile.
 #   4. docker compose up -d --build
 #
+# Caddy obtains and renews the certificate from Let's Encrypt itself — there
+# is no certs/ folder, no certbot, and no renewal timer to run.
+#
 # Users then connect at https://wrike.example.com/connect .
+#
+# Running more than one MCP server on this host? Use the shared proxy in
+# deploy/ instead (one host, one path per server) and attach this project to
+# it with docker-compose.override.shared-proxy.yml.example.
 
 services:
   wrike-mcp:
@@ -18,7 +24,7 @@ services:
       - .env
     environment:
       # The app binds 0.0.0.0 *inside* the private compose network only;
-      # nginx is the sole service with published ports.
+      # Caddy is the sole service with published ports.
       HOST: 0.0.0.0
       PORT: 3000
       TOKEN_STORE_PATH: /var/lib/wrike-mcp/tokens.json
@@ -41,9 +47,9 @@ services:
         limits:
           memory: 512M
 
-  nginx:
-    image: nginx:1.27-bookworm
-    container_name: wrike-mcp-nginx
+  caddy:
+    image: caddy:2.8-alpine
+    container_name: wrike-mcp-caddy
     restart: unless-stopped
     depends_on:
       wrike-mcp:
@@ -52,16 +58,24 @@ services:
       - "80:80"
       - "443:443"
     volumes:
-      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
-      - ./certs:/etc/nginx/certs:ro
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data       # TLS certs + ACME account keys — keep across rebuilds
+      - caddy-config:/config
     networks:
       - internal
+    deploy:
+      resources:
+        limits:
+          memory: 128M
 
 networks:
   internal:
-    # Private bridge network; only nginx publishes ports to the host.
+    # Private bridge network; only Caddy publishes ports to the host.
 
 volumes:
   wrike-tokens:
     # Holds only the AES-256-GCM encrypted token store (data/tokens.json
     # equivalent) — plaintext secrets are never written here.
+  caddy-data:
+    # Certificates and ACME account keys; losing it means re-issuing certs.
+  caddy-config:
