@@ -114,9 +114,9 @@ The walkthrough below is the simpler case: this server alone on its own
 hostname, with the bundled proxy. Swap `wrike.example.com` for your own.
 
 A `Dockerfile` + `docker-compose.yml` are included: the app runs as a non-root
-user in a minimal image, nginx terminates TLS, and the only published ports are
-80/443 on nginx. The app container is reachable solely over the private compose
-network.
+user in a minimal image, Caddy terminates TLS and obtains its own certificate
+from Let's Encrypt, and the only published ports are 80/443 on Caddy. The app
+container is reachable solely over the private compose network.
 
 ```bash
 # 1. On a fresh Ubuntu droplet, install Docker
@@ -126,38 +126,32 @@ curl -fsSL https://get.docker.com | sh
 # 2. Get the code
 git clone <your-repo> /opt/wrike-mcp && cd /opt/wrike-mcp
 
-# 3. Point DNS at the droplet (e.g. wrike.example.com), then get certificates:
-#    either copy your existing fullchain.pem/privkey.pem into ./certs/, or on the
-#    droplet run once:
-sudo apt install -y certbot
-sudo certbot certonly --standalone -d wrike.example.com
-mkdir -p certs
-sudo install -m 644 /etc/letsencrypt/live/wrike.example.com/fullchain.pem certs/
-sudo install -m 600 /etc/letsencrypt/live/wrike.example.com/privkey.pem certs/
-# (certs/ and .env are gitignored and dockerignored — they never enter images or the repo)
-# For automatic renewal, re-run the copy + `docker compose restart nginx` in a
-# monthly cron/systemd timer.
+# 3. Point a DNS A record at the droplet, then set the hostname and ACME
+#    email in the Caddyfile (both are placeholders in the checked-in copy):
+nano Caddyfile    # wrike.example.com, admin@example.com
 
 # 4. Configure (app-level credentials only — no user tokens)
 cp .env.example .env
-nano .env    # WRIKE_CLIENT_ID/SECRET/REDIRECT_URI, TOKEN_ENCRYPTION_KEY
+nano .env    # WRIKE_CLIENT_ID/SECRET/REDIRECT_URI, TOKEN_ENCRYPTION_KEY, PUBLIC_BASE_URL
 
-# 5. Launch
+# 5. Launch — Caddy gets the certificate on first start
 docker compose up -d --build
 
-docker compose ps            # wrike-mcp healthy, nginx up
+docker compose ps            # wrike-mcp healthy, caddy up
 curl https://wrike.example.com/healthz
 ```
+
+There is no certbot step and no renewal timer: Caddy renews automatically.
+Certificates live in the `caddy-data` volume, so keep it across rebuilds.
 
 Users then connect at `https://wrike.example.com/connect`.
 
 **Running more MCP servers on the same droplet?** Use the shared-proxy layout
-described above: one proxy container fronts everything by path, and each MCP
+described above: one Caddy container fronts everything by path, and each MCP
 server attaches to the common network with no published ports of its own.
-See [`deploy/README.md`](deploy/README.md) and
-`docker-compose.override.shared-proxy.yml.example`. A Caddy variant of the
-shared proxy (automatic Let's Encrypt — no certbot/renewals) lives in
-[`deploy/caddy/`](deploy/caddy/).
+See [`deploy/README.md`](deploy/README.md),
+[`deploy/caddy/`](deploy/caddy/) and
+`docker-compose.override.shared-proxy.yml.example`.
 
 
 **Updating**: `git pull && docker compose up -d --build` (the encrypted token
@@ -167,11 +161,12 @@ volume survives rebuilds, so users keep their connections).
 
 | Concern | Handled by |
 |---|---|
-| TLS, SSE-friendly proxying, 60 MB body limit | nginx container (published 80/443 only) |
+| TLS (automatic Let's Encrypt), SSE-friendly proxying, 60 MB body limit | Caddy container (published 80/443 only) |
 | Process isolation, non-root (uid 1001), memory cap | app container on the private network |
 | Secrets | `.env` (mounted by compose, never baked into images) |
 | Encrypted token store | named volume `wrike-tokens` (AES-256-GCM file only) |
-| Restart policy | `unless-stopped` + healthcheck-gated nginx startup |
+| Restart policy | `unless-stopped` + healthcheck-gated Caddy startup |
+| Certificates | named volume `caddy-data` (renewed automatically) |
 
 **Firewall** (optional hardening, since only 80/443 are published anyway):
 ```bash
@@ -186,7 +181,7 @@ ufw allow OpenSSH && ufw allow 443 && ufw allow 80 && ufw enable
 <summary>Alternative: bare-metal systemd (no Docker)</summary>
 
 ```bash
-apt update && apt install -y nginx git curl
+apt update && apt install -y caddy git curl
 adduser --disabled-password mcp
 npm ci --omit=dev && npm run build && chown -R mcp:mcp /opt/wrike-mcp
 cat >/etc/wrike-mcp.env <<'EOF'
@@ -201,7 +196,7 @@ TOKEN_STORE_PATH=/var/lib/wrike-mcp/tokens.json
 EOF
 chmod 600 /etc/wrike-mcp.env
 systemd unit with NoNewPrivileges/PrivateTmp/ProtectSystem=strict,
-then nginx + certbot as in nginx/default.conf but proxying to 127.0.0.1:3000.
+then Caddy as in ./Caddyfile but with `reverse_proxy 127.0.0.1:3000`.
 ```
 </details>
 

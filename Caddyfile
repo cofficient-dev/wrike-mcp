@@ -1,0 +1,29 @@
+# Reverse proxy for the Wrike MCP server (Streamable HTTP + SSE friendly).
+#
+# Caddy obtains and renews the certificate from Let's Encrypt automatically,
+# and redirects HTTP to HTTPS on its own — there is nothing to install or
+# renew. Replace both placeholders below before the first start.
+
+{
+	# Required by Let's Encrypt for expiry notices.
+	email admin@example.com
+}
+
+wrike.example.com {
+	header {
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+		-Server
+	}
+
+	# Matches the app's own 50 MB body limit, with headroom for multipart
+	# attachment uploads.
+	request_body {
+		max_size 60MB
+	}
+
+	# reverse_proxy is streaming-friendly by default: no response buffering
+	# and no read/write timeout on streamed responses, which is what the MCP
+	# Streamable HTTP transport needs.
+	reverse_proxy wrike-mcp:3000
+}

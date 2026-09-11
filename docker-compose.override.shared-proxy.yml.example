@@ -1,16 +1,20 @@
 # Shared-proxy variant.
 #
-# Use when a single nginx reverse-proxy container fronts MULTIPLE MCP servers
-# on one host (e.g. https://host/mcp -> this server, https://host/github -> another).
+# Use when a single Caddy reverse-proxy container fronts MULTIPLE MCP servers
+# on one host: https://mcp.example.com/wrike -> this server,
+# https://mcp.example.com/github -> another, and so on.
 #
 # Setup:
-#   1. Create the shared proxy once (see deploy/proxy/docker-compose.yml):
+#   1. Create the shared proxy once (see deploy/caddy/docker-compose.yml):
 #        docker network create mcp-proxy
-#        docker compose -f deploy/proxy/docker-compose.yml up -d
+#        docker compose -f deploy/caddy/docker-compose.yml up -d
 #   2. In this project: cp docker-compose.override.shared-proxy.yml.example docker-compose.override.yml
-#   3. docker compose up -d --build
+#   3. Set PUBLIC_BASE_URL=https://mcp.example.com/wrike and
+#      WRIKE_REDIRECT_URI=https://mcp.example.com/wrike/oauth/callback in .env
+#      (register that redirect URI in the Wrike App Console too).
+#   4. docker compose up -d --build
 #
-# The override removes this project's own nginx and attaches the app to the
+# The override removes this project's own Caddy and attaches the app to the
 # shared `mcp-proxy` network instead. Secrets still come only from .env.
 
 services:
@@ -26,13 +30,13 @@ services:
       - default
       - mcp-proxy
 
-  # Disable the bundled nginx: the shared proxy fronts everything.
-  nginx:
+  # Disable the bundled Caddy: the shared proxy owns 80/443 and the certs.
+  caddy:
     profiles:
       - disabled
 
 networks:
   mcp-proxy:
-    # The external network created by deploy/proxy; the proxy resolves
+    # The external network created by deploy/caddy; the proxy resolves
     # "wrike-mcp" by container/compose service name on this network.
     external: true

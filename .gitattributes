@@ -1,0 +1,10 @@
+# Files consumed by Linux (containers, droplets) must keep LF regardless of a
+# contributor's core.autocrlf setting. A CRLF shebang fails on the host with
+# "bad interpreter: No such file or directory". These are all LF today; this
+# pins it so a Windows checkout cannot quietly change it.
+*.sh        text eol=lf
+Dockerfile  text eol=lf
+Caddyfile   text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf
+*.example   text eol=lf
