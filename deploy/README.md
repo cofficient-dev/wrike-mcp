@@ -131,9 +131,16 @@ Subdomain deployments (`https://wrike.example.com`) have an empty issuer path
 and need none of this.
 
 Then attach each MCP server (step below). Another server on the same host =
-another path block in the Caddyfile:
+another path block in the Caddyfile — plus its own `/.well-known/` handles if
+it speaks MCP OAuth, for the same reason as above:
 
 ```caddyfile
+handle /.well-known/oauth-authorization-server/github* {
+    reverse_proxy github-mcp:3000
+}
+handle /.well-known/oauth-protected-resource/github* {
+    reverse_proxy github-mcp:3000
+}
 handle_path /github/* {
     reverse_proxy github-mcp:3000
 }
@@ -155,7 +162,11 @@ docker compose up -d
 ```
 
 2. Add one route per server in `default.conf` — see the commented examples
-   inside it.
+   inside it. As shipped, `location /` sends everything to wrike-mcp, so
+   discovery works unprefixed. If you move a server behind a path prefix, give
+   it the host-rooted `/.well-known/oauth-authorization-server/<prefix>` and
+   `/.well-known/oauth-protected-resource/<prefix>` locations too — same
+   RFC 8414/9728 requirement as the Caddy section above.
 3. Monthly renewal timer: certbot renew → copy certs into `certs/` →
    `docker compose restart proxy`.
 
