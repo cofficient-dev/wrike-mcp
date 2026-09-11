@@ -9,7 +9,7 @@ Built with TypeScript, [`@modelcontextprotocol/sdk`](https://github.com/modelcon
 ```
 Admin (once)                    User (self-service)               MCP client (Claude etc.)
 ──────────                      ────────────────────               ───────────────────────
-deploy server with              visits https://host/connect  ───►  Wrike consent page
+deploy server with              visits <host>/wrike/connect  ───►  Wrike consent page
 OAuth app credentials           logs in with THEIR Wrike acct       (Wrike, not this server)
                                 ◄── redirected back with code
                                 server exchanges code, encrypts
@@ -57,12 +57,12 @@ npm start
 | `WRIKE_CLIENT_ID`, `WRIKE_CLIENT_SECRET`, `WRIKE_REDIRECT_URI`, `WRIKE_SCOPES` | oauth | **App** credentials from the Wrike App Console — these identify the app, not any user. `WRIKE_SCOPES` comma-delimited (e.g. `Default,wsReadWrite`). |
 | `TOKEN_ENCRYPTION_KEY` | both | 64 hex chars (32 bytes) — AES-256-GCM key for the encrypted token store. Generate: `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"` |
 | `TOKEN_STORE_PATH` | both | Encrypted store location (default `data/tokens.json`). |
-| `PUBLIC_BASE_URL` | oauth | Public origin as MCP clients see it (include path prefix, e.g. `https://host/wrike`). Enables MCP-native OAuth sign-in (see below). |
+| `PUBLIC_BASE_URL` | oauth | Public origin exactly as MCP clients see it, including any path prefix and no trailing slash — normally `https://mcp.example.com/wrike` (one host, one path per MCP server). A server on its own hostname uses the bare origin, `https://wrike.example.com`. Enables MCP-native OAuth sign-in (see below). |
 
 ### User flow (oauth mode)
 
 **Header-token flow (any MCP client):**
-1. User visits `https://your-host/connect` (optionally `?user=their-handle`).
+1. User visits `https://mcp.example.com/wrike/connect` (optionally `?user=their-handle`).
    A handle that is already connected is refused with 409 — pick another, or
    revoke the existing connection first, since reusing it would repoint every
    connection token already issued for that handle at the new Wrike account.
@@ -94,7 +94,8 @@ Confirming the screen posts to `/connect/confirm`; the flow cannot be skipped
 by a cross-site form (see Security model).
 
 **Claude setup:** Settings → Connectors → Add custom connector →
-URL `https://your-host/wrike/mcp` → Authentication **"Always required"** →
+URL `https://mcp.example.com/wrike/mcp` (or `https://wrike.example.com/mcp` if
+the server has its own hostname) → Authentication **"Always required"** →
 OAuth client **"No client ID — register one automatically"** (dynamic client
 registration). The user signs in through the browser once and is done.
 
@@ -102,6 +103,15 @@ The header-token flow above keeps working in parallel for clients without
 OAuth support.
 
 ## Deployment (DigitalOcean droplet, Docker)
+
+**Recommended layout:** one host with a shared proxy, one path per MCP server
+(`https://mcp.example.com/wrike`, `https://mcp.example.com/github`, …), so
+adding a server is a route rather than a new certificate. That layout — and the
+`PUBLIC_BASE_URL`, `WRIKE_REDIRECT_URI` and `/.well-known/` proxy routes it
+needs — is in [`deploy/README.md`](deploy/README.md).
+
+The walkthrough below is the simpler case: this server alone on its own
+hostname, with the bundled proxy. Swap `wrike.example.com` for your own.
 
 A `Dockerfile` + `docker-compose.yml` are included: the app runs as a non-root
 user in a minimal image, nginx terminates TLS, and the only published ports are
@@ -141,9 +151,9 @@ curl https://wrike.example.com/healthz
 
 Users then connect at `https://wrike.example.com/connect`.
 
-**Running more MCP servers on the same droplet?** Use the shared-proxy
-variant: one nginx container fronts everything by path or subdomain, and each
-MCP server attaches to the common network with no published ports of its own.
+**Running more MCP servers on the same droplet?** Use the shared-proxy layout
+described above: one proxy container fronts everything by path, and each MCP
+server attaches to the common network with no published ports of its own.
 See [`deploy/README.md`](deploy/README.md) and
 `docker-compose.override.shared-proxy.yml.example`. A Caddy variant of the
 shared proxy (automatic Let's Encrypt — no certbot/renewals) lives in
