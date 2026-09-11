@@ -339,16 +339,24 @@ export const ListAttachmentsSchema = z
   .object({
     targetType: z.enum(['tasks', 'folders']),
     targetId: z.string().regex(/^([A-Z0-9]){8,16}$/),
-    withUrl: z.boolean().optional(),
-    fields: z.array(z.string()).optional(),
+    /** Wrike names this `withUrls` (plural); a `url` valid for 24h is added to each attachment. */
+    withUrls: z.boolean().optional(),
+    /** Include previous versions of each attachment. */
+    versions: z.boolean().optional(),
   })
   .strict();
 
 export const GetAttachmentSchema = z
   .object({
     attachmentId: z.string().regex(/^([A-Z0-9]){16}$/),
-    withUrl: z.boolean().optional(),
+    /**
+     * Return the file content itself, base64-encoded, instead of only metadata.
+     * Uses GET /attachments/{id}/download, which is the only endpoint that
+     * yields bytes — the metadata endpoint has no URL-bearing parameter.
+     */
     download: z.boolean().optional(),
+    /** Include previous versions in the metadata response. */
+    versions: z.boolean().optional(),
   })
   .strict();
 

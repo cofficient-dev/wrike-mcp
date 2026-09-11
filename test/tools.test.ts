@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { buildTools } from '../src/tools/toolDefinitions.js';
+import { BinaryTooLargeError } from '../src/wrikeClient.js';
 import type { WrikeClient } from '../src/wrikeClient.js';
 
 function mockClient() {
@@ -9,6 +10,11 @@ function mockClient() {
     put: vi.fn().mockResolvedValue({ kind: 'ok', data: [{ id: 'X' }] }),
     delete: vi.fn().mockResolvedValue({ kind: 'ok', data: [] }),
     upload: vi.fn().mockResolvedValue({ kind: 'attachments', data: [{ id: 'ATT' }] }),
+    getBinary: vi.fn().mockResolvedValue({
+      data: Buffer.from('PNGBYTES'),
+      contentType: 'image/png',
+      filename: 'shot.png',
+    }),
   } as unknown as WrikeClient;
 }
 
@@ -170,5 +176,87 @@ describe('tool validation and dispatch', () => {
     await expect(
       byName('get_task').handler(mockClient(), { taskId: 'TASK1234', bogus: 1 })
     ).rejects.toThrow();
+  });
+});
+describe('attachment download', () => {
+  it('get_attachment returns metadata only when download is not set', async () => {
+    const client = mockClient();
+    await byName('get_attachment').handler(client, { attachmentId: 'IEAGIITRIMFWG6YH' });
+    const [path, params] = (client.get as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(path).toBe('/attachments/IEAGIITRIMFWG6YH');
+    // The metadata endpoint supports only `versions`; withUrl(s) is rejected by Wrike.
+    expect(params).not.toHaveProperty('withUrl');
+    expect(params).not.toHaveProperty('withUrls');
+    expect(client.getBinary as ReturnType<typeof vi.fn>).not.toHaveBeenCalled();
+  });
+
+  it('get_attachment with download returns base64 file content', async () => {
+    const client = mockClient();
+    // The regression: `download` was accepted by the schema and silently
+    // dropped, so callers only ever got metadata back.
+    const result = (await byName('get_attachment').handler(client, {
+      attachmentId: 'IEAGIITRIMFWG6YH',
+      download: true,
+    })) as Record<string, unknown>;
+
+    const [path] = (client.getBinary as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(path).toBe('/attachments/IEAGIITRIMFWG6YH/download');
+    expect(result.encoding).toBe('base64');
+    expect(Buffer.from(result.content as string, 'base64').toString()).toBe('PNGBYTES');
+    expect(result.contentType).toBe('image/png');
+    expect(result.filename).toBe('shot.png');
+    expect(result.size).toBe(8);
+  });
+
+  it('get_attachment passes a byte budget to getBinary so oversized files are rejected before buffering', async () => {
+    const client = mockClient();
+    await byName('get_attachment').handler(client, { attachmentId: 'IEAGIITRIMFWG6YH', download: true });
+    const call = (client.getBinary as ReturnType<typeof vi.fn>).mock.calls[0];
+    // Enforcement lives inside getBinary (Content-Length check, then a
+    // streamed cutoff) precisely so an oversized body is never fully
+    // buffered here first — the handler only supplies the budget.
+    expect(call[3]).toBeGreaterThan(0);
+  });
+
+  it('get_attachment turns BinaryTooLargeError into a message naming the alternative', async () => {
+    const client = mockClient();
+    (client.getBinary as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new BinaryTooLargeError(6 * 1024 * 1024, 5 * 1024 * 1024)
+    );
+    await expect(
+      byName('get_attachment').handler(client, { attachmentId: 'IEAGIITRIMFWG6YH', download: true })
+    ).rejects.toThrow(/withUrls/);
+  });
+
+  it('get_attachment lets a non-size error from getBinary pass through unchanged', async () => {
+    const client = mockClient();
+    (client.getBinary as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('network blip'));
+    await expect(
+      byName('get_attachment').handler(client, { attachmentId: 'IEAGIITRIMFWG6YH', download: true })
+    ).rejects.toThrow('network blip');
+  });
+
+  it('get_attachment rejects the removed withUrl parameter', async () => {
+    await expect(
+      byName('get_attachment').handler(mockClient(), {
+        attachmentId: 'IEAGIITRIMFWG6YH',
+        withUrl: true,
+      })
+    ).rejects.toThrow();
+  });
+
+  it('list_attachments sends withUrls, not withUrl', async () => {
+    const client = mockClient();
+    await byName('list_attachments').handler(client, {
+      targetType: 'tasks',
+      targetId: 'IEAGIITR',
+      withUrls: true,
+    });
+    const [path, params] = (client.get as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(path).toBe('/tasks/IEAGIITR/attachments');
+    expect(params).toMatchObject({ withUrls: true });
+    expect(params).not.toHaveProperty('withUrl');
+    // `fields` is not supported on this endpoint and was previously sent.
+    expect(params).not.toHaveProperty('fields');
   });
 });
