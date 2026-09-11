@@ -102,6 +102,37 @@ describe('WrikeClient (per-user)', () => {
     expect(refreshFetch).toHaveBeenCalledTimes(1);
   });
 
+  it('cancels the failed response body on 401 and 429 before retrying', async () => {
+    // The retry branches recurse without ever reading the failed response's
+    // body. Left uncancelled, undici keeps that connection out of the pool
+    // until GC finalizes it — on every retried call. json() is what would
+    // normally drain it, but these branches deliberately skip that, so the
+    // cancel has to be explicit.
+    const failed401 = jsonResponse(401, { error: 'not_authorized', errorDescription: 'stale' });
+    const cancel401 = vi.spyOn(failed401.body!, 'cancel');
+    const failed429 = jsonResponse(429, { error: 'rate_limit_exceeded' }, { 'Retry-After': '0' });
+    const cancel429 = vi.spyOn(failed429.body!, 'cancel');
+
+    let call = 0;
+    const fetchImpl = vi.fn().mockImplementation(() => {
+      call += 1;
+      if (call === 1) return Promise.resolve(failed401);
+      if (call === 2) return Promise.resolve(failed429);
+      return Promise.resolve(jsonResponse(200, { kind: 'tasks', data: [] }));
+    });
+    const refreshFetch = vi.fn().mockResolvedValue(
+      jsonResponse(200, { access_token: 'AT2', refresh_token: 'RT2', token_type: 'bearer', expires_in: 3600 })
+    );
+    const mgr = new AuthManager(oauthConfig, store, Date.now, refreshFetch as unknown as typeof fetch);
+    await mgr.storeUserTokens('carol', tokens());
+    const client = new WrikeClient(mgr, 'carol', fetchImpl as unknown as typeof fetch);
+
+    const res = await client.request('GET', '/tasks'); // 401 -> refresh -> 429 -> backoff -> ok
+    expect(res.kind).toBe('tasks');
+    expect(cancel401).toHaveBeenCalledTimes(1);
+    expect(cancel429).toHaveBeenCalledTimes(1);
+  });
+
   it('does NOT refresh on 401 in pat mode', async () => {
     const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(401, { error: 'not_authorized', errorDescription: 'x' }));
     const client = new WrikeClient(new AuthManager(patConfig, store), '__pat__', fetchImpl as unknown as typeof fetch);
@@ -178,6 +209,48 @@ describe('WrikeClient.getBinary', () => {
     const client = new WrikeClient(manager, AuthManager.PAT_USER_ID, fetchImpl as unknown as typeof fetch);
 
     await expect(client.getBinary('/attachments/IEAGIITRIMFWG6YH/download')).rejects.toThrow(WrikeApiError);
+  });
+
+  it('cancels the failed response body on 401 before retrying', async () => {
+    // Same leak as doRequest's retry branches: the failed response here is
+    // never read, so it must be cancelled explicitly or undici holds the
+    // connection open until GC finalizes it.
+    const failed401 = jsonResponse(401, { error: 'not_authorized', errorDescription: 'stale' });
+    const cancelSpy = vi.spyOn(failed401.body!, 'cancel');
+    const refreshFetch = vi.fn().mockResolvedValue(
+      jsonResponse(200, { access_token: 'AT2', refresh_token: 'RT2', token_type: 'bearer', expires_in: 3600 })
+    );
+    let first = true;
+    const fetchImpl = vi.fn().mockImplementation(() => {
+      if (first) {
+        first = false;
+        return Promise.resolve(failed401);
+      }
+      return Promise.resolve(new Response(new Uint8Array(Buffer.from('OK')), { status: 200 }));
+    });
+    const mgr = new AuthManager(oauthConfig, store, Date.now, refreshFetch as unknown as typeof fetch);
+    await mgr.storeUserTokens('leak-check', tokens());
+    const client = new WrikeClient(mgr, 'leak-check', fetchImpl as unknown as typeof fetch);
+
+    await client.getBinary('/attachments/IEAGIITRIMFWG6YH/download');
+    expect(cancelSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('cancels the failed response body on 429 before retrying', async () => {
+    const failed429 = jsonResponse(429, { error: 'rate_limit_exceeded' }, { 'Retry-After': '0' });
+    const cancelSpy = vi.spyOn(failed429.body!, 'cancel');
+    let first = true;
+    const fetchImpl = vi.fn().mockImplementation(() => {
+      if (first) {
+        first = false;
+        return Promise.resolve(failed429);
+      }
+      return Promise.resolve(new Response(new Uint8Array(Buffer.from('OK')), { status: 200 }));
+    });
+    const client = new WrikeClient(new AuthManager(patConfig, store), AuthManager.PAT_USER_ID, fetchImpl as unknown as typeof fetch);
+
+    await client.getBinary('/attachments/IEAGIITRIMFWG6YH/download');
+    expect(cancelSpy).toHaveBeenCalledTimes(1);
   });
 
   it('refreshes once on 401 and retries', async () => {

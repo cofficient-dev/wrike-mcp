@@ -123,14 +123,20 @@ export class WrikeClient {
 
     const res = await this.fetchImpl(url.toString(), { method, headers, body: bodyText });
 
+    // Pre-existing instance of the same leak fixed in getBinary below: a
+    // failed response being retried, rather than read for its error body,
+    // must have its body explicitly cancelled or undici keeps the socket
+    // out of the connection pool until GC finalizes it.
     if (!res.ok && res.status === 401 && attempt === 0 && this.authManager.authMode === 'oauth') {
       // Access token may be stale: force refresh and retry once.
+      await res.body?.cancel().catch(() => undefined);
       await this.authManager.refresh(this.userId);
       return this.doRequest(method, path, params, body, 1);
     }
 
     if (!res.ok && res.status === 429 && attempt < 2) {
       const retryAfterMs = Number(res.headers.get('Retry-After') ?? 0) || (attempt + 1) * 1000;
+      await res.body?.cancel().catch(() => undefined);
       await new Promise((r) => setTimeout(r, retryAfterMs));
       return this.doRequest(method, path, params, body, attempt + 1);
     }
@@ -219,12 +225,18 @@ export class WrikeClient {
     });
 
     // Same recovery as doRequest: a stale access token, then rate limiting.
+    // Neither branch reads the failed response's body, so it must be
+    // cancelled explicitly before recursing — otherwise undici holds the
+    // socket open (unread body keeps it out of the connection pool) until
+    // GC finalizes it, on every retried call.
     if (!res.ok && res.status === 401 && attempt === 0 && this.authManager.authMode === 'oauth') {
+      await res.body?.cancel().catch(() => undefined);
       await this.authManager.refresh(this.userId);
       return this.getBinary(path, params, 1, maxBytes);
     }
     if (!res.ok && res.status === 429 && attempt < 2) {
       const retryAfterMs = Number(res.headers.get('Retry-After') ?? 0) || (attempt + 1) * 1000;
+      await res.body?.cancel().catch(() => undefined);
       await new Promise((r) => setTimeout(r, retryAfterMs));
       return this.getBinary(path, params, attempt + 1, maxBytes);
     }
