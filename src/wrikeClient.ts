@@ -123,6 +123,37 @@ export class WrikeClient {
     private readonly fetchImpl: HttpFetch = fetch
   ) {}
 
+  /**
+   * Shared 401/429 recovery for the two request paths (JSON and binary).
+   *
+   * Returns the retry result when it handled the response, or undefined when
+   * the caller must process it normally. Both branches cancel the failed
+   * response's body before recursing: neither ever reads it, and undici
+   * keeps an unread connection out of the pool until GC finalizes it — this
+   * exact cancel was once missing independently in each copy of the block,
+   * which is the duplication this helper exists to prevent.
+   */
+  private async recover<T>(
+    res: Response,
+    attempt: number,
+    retry: (nextAttempt: number) => Promise<T>
+  ): Promise<T | undefined> {
+    if (res.ok) return undefined;
+    if (res.status === 401 && attempt === 0 && this.authManager.authMode === 'oauth') {
+      // Access token may be stale: force refresh and retry once.
+      await res.body?.cancel().catch(() => undefined);
+      await this.authManager.refresh(this.userId);
+      return retry(1);
+    }
+    if (res.status === 429 && attempt < 2) {
+      const retryAfterMs = Number(res.headers.get('Retry-After') ?? 0) || (attempt + 1) * 1000;
+      await res.body?.cancel().catch(() => undefined);
+      await new Promise((r) => setTimeout(r, retryAfterMs));
+      return retry(attempt + 1);
+    }
+    return undefined;
+  }
+
   private async doRequest<T>(
     method: HttpMethod,
     path: string,
@@ -149,23 +180,10 @@ export class WrikeClient {
 
     const res = await this.fetchImpl(url.toString(), { method, headers, body: bodyText });
 
-    // Pre-existing instance of the same leak fixed in getBinary below: a
-    // failed response being retried, rather than read for its error body,
-    // must have its body explicitly cancelled or undici keeps the socket
-    // out of the connection pool until GC finalizes it.
-    if (!res.ok && res.status === 401 && attempt === 0 && this.authManager.authMode === 'oauth') {
-      // Access token may be stale: force refresh and retry once.
-      await res.body?.cancel().catch(() => undefined);
-      await this.authManager.refresh(this.userId);
-      return this.doRequest(method, path, params, body, 1);
-    }
-
-    if (!res.ok && res.status === 429 && attempt < 2) {
-      const retryAfterMs = Number(res.headers.get('Retry-After') ?? 0) || (attempt + 1) * 1000;
-      await res.body?.cancel().catch(() => undefined);
-      await new Promise((r) => setTimeout(r, retryAfterMs));
-      return this.doRequest(method, path, params, body, attempt + 1);
-    }
+    const retried = await this.recover<WrikeResponse<T>>(res, attempt, (next) =>
+      this.doRequest<T>(method, path, params, body, next)
+    );
+    if (retried !== undefined) return retried;
 
     const json = (await res.json().catch(() => ({}))) as
       | WrikeResponse<T>
@@ -250,22 +268,13 @@ export class WrikeClient {
       headers: { Authorization: `bearer ${token}`, Accept: '*/*' },
     });
 
-    // Same recovery as doRequest: a stale access token, then rate limiting.
-    // Neither branch reads the failed response's body, so it must be
-    // cancelled explicitly before recursing — otherwise undici holds the
-    // socket open (unread body keeps it out of the connection pool) until
-    // GC finalizes it, on every retried call.
-    if (!res.ok && res.status === 401 && attempt === 0 && this.authManager.authMode === 'oauth') {
-      await res.body?.cancel().catch(() => undefined);
-      await this.authManager.refresh(this.userId);
-      return this.getBinary(path, params, 1, maxBytes);
-    }
-    if (!res.ok && res.status === 429 && attempt < 2) {
-      const retryAfterMs = Number(res.headers.get('Retry-After') ?? 0) || (attempt + 1) * 1000;
-      await res.body?.cancel().catch(() => undefined);
-      await new Promise((r) => setTimeout(r, retryAfterMs));
-      return this.getBinary(path, params, attempt + 1, maxBytes);
-    }
+    // Same recovery as doRequest (shared helper): a stale access token, then
+    // rate limiting — cancelling the failed body before each retry.
+    const retried = await this.recover(res, attempt, (next) =>
+      this.getBinary(path, params, next, maxBytes)
+    );
+    if (retried !== undefined) return retried;
+
     if (!res.ok) {
       const err = (await res.json().catch(() => ({}))) as WrikeErrorResponse;
       throw new WrikeApiError(
