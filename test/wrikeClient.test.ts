@@ -410,4 +410,17 @@ describe('Content-Disposition filename forms', () => {
     // RFC 6266: quoted-string is literal; decoding would corrupt the name.
     expect(out.filename).toBe('100% done.pdf');
   });
+
+  it('decodes every quoted-pair, not only escaped quotes', async () => {
+    // One literal backslash in the name, sent doubled per the quoted-pair
+    // rules. The capture regex accepts \\, so the decode must collapse it
+    // too — handling only \" left backslashes doubled in the result.
+    const out = await withDisposition('attachment; filename="a\\\\b.pdf"')();
+    expect(out.filename).toBe('a\\b.pdf');
+  });
+
+  it('keeps an escaped quote as one quote character', async () => {
+    const out = await withDisposition('attachment; filename="say \\"hi\\".pdf"')();
+    expect(out.filename).toBe('say "hi".pdf');
+  });
 });

@@ -99,7 +99,10 @@ function dispositionFilename(disposition: string): string | undefined {
   const ext = /filename\*=\s*[a-z0-9-]*'[^']*'([^;\s]+)/i.exec(disposition);
   if (ext?.[1]) return decodeFilename(ext[1]);
   const quoted = /filename=\s*"((?:[^"\\]|\\.)*)"/i.exec(disposition);
-  if (quoted?.[1]) return quoted[1].replace(/\\"/g, '"');
+  // Quoted-pair decode: in a quoted-string, backslash + any char means that
+  // char literally. Handling only \" left escaped backslashes doubled — the
+  // capture regex accepts \\ too, so the decode has to cover both.
+  if (quoted?.[1]) return quoted[1].replace(/\\(.)/g, '$1');
   const token = /filename=\s*([^;\s]+)/i.exec(disposition);
   return token?.[1] || undefined;
 }
