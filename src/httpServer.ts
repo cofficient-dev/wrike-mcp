@@ -1,5 +1,6 @@
 import express, { type Express, type Request, type Response, type NextFunction } from 'express';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { Readable } from 'node:stream';
 import { AuthManager } from './auth/authManager.js';
 import { OAuthStateManager, WRIKE_AUTHORIZE_URL, exchangeCodeForTokens, toStoredTokens } from './auth/oauth.js';
 import { McpOAuthServer, McpOauthError } from './auth/mcpOauth.js';
@@ -275,14 +276,30 @@ export function createHttpApp({
         }
         try {
             const client = new WrikeClient(authManager, userId, fetchImpl);
-            // No MAX_INLINE_DOWNLOAD_BYTES here: that cap exists only because
-            // an MCP tool response carries base64 inline; a direct browser
-            // download has no such limit, and lifting it for large files is
-            // exactly why this route exists.
-            const file = await client.getBinary(`/attachments/${attachmentId}/download`);
+            // Streamed, not buffered. No MAX_INLINE_DOWNLOAD_BYTES applies
+            // here — that cap exists only because an MCP tool response carries
+            // base64 inline, and serving large files is the point of this
+            // route — but "no cap" must not mean "hold the whole file in
+            // memory": a few concurrent large downloads would exhaust the
+            // process, and the rate limiter counts requests, not bytes.
+            const file = await client.getBinaryStream(`/attachments/${attachmentId}/download`);
             res.set('Content-Type', file.contentType);
             res.set('Content-Disposition', contentDispositionHeader(file.filename));
-            res.send(file.data);
+            // Private file bytes authorised by a URL-borne credential: keep
+            // them out of any shared or intermediary cache, which would
+            // otherwise apply its own heuristics to a per-user response.
+            res.set('Cache-Control', 'private, no-store');
+            if (!file.body) {
+                res.end();
+                return;
+            }
+            // Once bytes start flowing the status line is already sent, so a
+            // mid-stream failure cannot become a 502 — destroy the socket
+            // instead, which surfaces to the client as a truncated transfer
+            // rather than a silently short file.
+            const body = Readable.fromWeb(file.body as Parameters<typeof Readable.fromWeb>[0]);
+            body.on('error', () => res.destroy());
+            body.pipe(res);
         } catch (err) {
             res.status(502).json({ error: 'download_failed', errorDescription: redact(errorMessage(err)) });
         }

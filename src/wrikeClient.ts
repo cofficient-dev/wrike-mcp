@@ -257,12 +257,16 @@ export class WrikeClient {
    * bytes would be lost. Errors still come back as JSON, so those are decoded
    * on the failure path exactly as elsewhere.
    */
-  async getBinary(
-    path: string,
-    params: QueryParams = {},
-    attempt = 0,
-    maxBytes?: number
-  ): Promise<{ data: Buffer; contentType: string; filename?: string }> {
+  /**
+   * Issues the authenticated GET and applies the shared 401/429 recovery,
+   * handing back the raw Response with its body still unread.
+   *
+   * Split out so the buffering path (getBinary) and the streaming path
+   * (getBinaryStream) share one copy of the auth, retry and error handling
+   * rather than growing a second near-copy — the same duplication that once
+   * let the missing body-cancel bug exist in two places at once.
+   */
+  private async fetchBinary(path: string, params: QueryParams, attempt: number): Promise<Response> {
     const host = await this.authManager.getHost(this.userId);
     const token = await this.authManager.getAccessToken(this.userId);
     const url = new URL(`https://${host}/api/v4${path}`);
@@ -276,9 +280,7 @@ export class WrikeClient {
 
     // Same recovery as doRequest (shared helper): a stale access token, then
     // rate limiting — cancelling the failed body before each retry.
-    const retried = await this.recover(res, attempt, (next) =>
-      this.getBinary(path, params, next, maxBytes)
-    );
+    const retried = await this.recover(res, attempt, (next) => this.fetchBinary(path, params, next));
     if (retried !== undefined) return retried;
 
     if (!res.ok) {
@@ -289,6 +291,39 @@ export class WrikeClient {
         `Wrike API error ${res.status} (${err.error ?? 'unknown_error'}): ${err.errorDescription ?? res.statusText}`
       );
     }
+    return res;
+  }
+
+  /**
+   * Streams a binary body straight through without buffering it.
+   *
+   * getBinary below holds the whole file in memory, which is correct for the
+   * inline tool path because MAX_INLINE_DOWNLOAD_BYTES bounds it. The browser
+   * download route deliberately has no such cap — allowing large files is the
+   * point of it — so buffering there would let a few concurrent downloads
+   * exhaust the process. Handing back the stream keeps memory flat regardless
+   * of file size.
+   */
+  async getBinaryStream(
+    path: string,
+    params: QueryParams = {}
+  ): Promise<{ body: ReadableStream<Uint8Array> | null; contentType: string; filename?: string }> {
+    const res = await this.fetchBinary(path, params, 0);
+    const filename = dispositionFilename(res.headers.get('Content-Disposition') ?? '');
+    return {
+      body: res.body,
+      contentType: res.headers.get('Content-Type') ?? 'application/octet-stream',
+      ...(filename !== undefined ? { filename } : {}),
+    };
+  }
+
+  async getBinary(
+    path: string,
+    params: QueryParams = {},
+    attempt = 0,
+    maxBytes?: number
+  ): Promise<{ data: Buffer; contentType: string; filename?: string }> {
+    const res = await this.fetchBinary(path, params, attempt);
 
     // Declared length check: rejects an oversized file before reading a
     // single byte of the body, when Wrike sends Content-Length (it does for

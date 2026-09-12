@@ -278,6 +278,52 @@ describe('GET /attachments/:id/file (signed download)', () => {
     expect(Buffer.from(res.body as Uint8Array).toString()).toBe('PNGBYTES');
   });
 
+  it('marks the response private and uncacheable', async () => {
+    // Private file bytes authorised by a URL-borne credential: a shared or
+    // intermediary cache must not be left to its own heuristics about them.
+    const config = configWithPublicBaseUrl();
+    const links = new AttachmentLinks(config.tokenEncryptionKey, config.publicBaseUrl!);
+    const fetchImpl = binaryFetch('PNGBYTES');
+    const { app } = makeApp(config, { fetchImpl: fetchImpl as unknown as typeof fetch, links });
+
+    const token = new URL(links.issue(AuthManager.PAT_USER_ID, 'IEAGIITRIMFWG6YH')).searchParams.get('token')!;
+    const res = await request(app).get(`/attachments/IEAGIITRIMFWG6YH/file?token=${encodeURIComponent(token)}`);
+
+    expect(res.headers['cache-control']).toBe('private, no-store');
+  });
+
+  it('streams rather than buffering the whole body', async () => {
+    // The route has no byte cap by design, so it must not hold the file in
+    // memory: a few concurrent large downloads would otherwise exhaust the
+    // process, and the rate limiter counts requests, not bytes. Asserting
+    // the body is consumed incrementally is the observable proxy for that.
+    const config = configWithPublicBaseUrl();
+    const links = new AttachmentLinks(config.tokenEncryptionKey, config.publicBaseUrl!);
+    const chunk = 'y'.repeat(64 * 1024);
+    let pulls = 0;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulls += 1;
+        if (pulls > 8) {
+          controller.close();
+          return;
+        }
+        controller.enqueue(new Uint8Array(Buffer.from(chunk)));
+      },
+    });
+    const fetchImpl = vi.fn().mockResolvedValue(
+      new Response(body, { status: 200, headers: { 'Content-Type': 'application/octet-stream' } })
+    );
+    const { app } = makeApp(config, { fetchImpl: fetchImpl as unknown as typeof fetch, links });
+
+    const token = new URL(links.issue(AuthManager.PAT_USER_ID, 'STREAMEDATTACH01')).searchParams.get('token')!;
+    const res = await request(app).get(`/attachments/STREAMEDATTACH01/file?token=${encodeURIComponent(token)}`);
+
+    expect(res.status).toBe(200);
+    // All 8 chunks arrive intact through the pipe.
+    expect((res.body as Uint8Array).length).toBe(chunk.length * 8);
+  });
+
   it('does not apply the MCP inline-download byte cap', async () => {
     // MAX_INLINE_DOWNLOAD_BYTES exists only because base64 rides inside an
     // MCP tool response; a direct browser download must not be capped by it.
