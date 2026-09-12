@@ -2,7 +2,7 @@
 
 A Model Context Protocol (MCP) server for the [Wrike API v4](https://developers.wrike.com/docs/overview), designed for **organisation-level deployment on the web**: each user connects their **own** Wrike account, and every token and secret stays encrypted at rest and invisible over the wire.
 
-Built with TypeScript, [`@modelcontextprotocol/sdk`](https://github.com/modelcontextprotocol/typescript-sdk) (Streamable HTTP transport), Express, and Zod. Tested with Vitest (114 tests) plus an end-to-end smoke script.
+Built with TypeScript, [`@modelcontextprotocol/sdk`](https://github.com/modelcontextprotocol/typescript-sdk) (Streamable HTTP transport), Express, and Zod. Tested with Vitest (157 tests) plus an end-to-end smoke script.
 
 ## How it works (per-user auth)
 
@@ -36,6 +36,8 @@ OAuth app credentials           logs in with THEIR Wrike acct       (Wrike, not 
 | Timelogs | `create_timelog`, `list_timelogs`, `update_timelog`, `delete_timelog` |
 | Attachments | `create_attachment`, `list_attachments`, `get_attachment`, `delete_attachment` |
 
+`get_attachment` takes a `mode`: `'metadata'` (default, no file bytes), `'url'` (a short-lived signed link on this server for a **person** to open in a browser — requires `PUBLIC_BASE_URL`), or `'download'` (base64 file content inline, for a **program** to consume — never use it to relay a file to someone in a chat reply, since an LLM cannot reproduce a long base64 string verbatim).
+
 **Full object support**: `create_task`/`update_task` accept the complete Wrike task object — `dates` (`type`, `start`, `due`, `duration`, `workOnWeekends`), `effortAllocation` (`mode`, `totalEffort`, `allocatedEffort`, `dailyAllocationPercentage`, `responsibleAllocation[]`), custom fields, metadata, responsibles, followers, superTasks, priority, billing type, custom statuses. Schemas mirror the official OpenAPI definitions at developers.wrike.com.
 
 ## Setup (admin, once)
@@ -57,7 +59,7 @@ npm start
 | `WRIKE_CLIENT_ID`, `WRIKE_CLIENT_SECRET`, `WRIKE_REDIRECT_URI`, `WRIKE_SCOPES` | oauth | **App** credentials from the Wrike App Console — these identify the app, not any user. `WRIKE_SCOPES` comma-delimited (e.g. `Default,wsReadWrite`). |
 | `TOKEN_ENCRYPTION_KEY` | both | 64 hex chars (32 bytes) — AES-256-GCM key for the encrypted token store. Generate: `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"` |
 | `TOKEN_STORE_PATH` | both | Encrypted store location (default `data/tokens.json`). |
-| `PUBLIC_BASE_URL` | oauth | Public origin exactly as MCP clients see it, including any path prefix and no trailing slash — normally `https://mcp.example.com/wrike` (one host, one path per MCP server). A server on its own hostname uses the bare origin, `https://wrike.example.com`. Enables MCP-native OAuth sign-in (see below). |
+| `PUBLIC_BASE_URL` | both | Public origin exactly as MCP clients see it, including any path prefix and no trailing slash — normally `https://mcp.example.com/wrike` (one host, one path per MCP server). A server on its own hostname uses the bare origin, `https://wrike.example.com`. Enables MCP-native OAuth sign-in (oauth mode; see below) and `get_attachment` `mode: 'url'` signed download links (both modes) — without it, `mode: 'url'` fails with a clear error rather than emitting a broken/relative URL. |
 
 ### User flow (oauth mode)
 
@@ -215,7 +217,7 @@ then Caddy as in ./Caddyfile but with `reverse_proxy 127.0.0.1:3000`.
 ## Tests
 
 ```bash
-npm test                                  # 114 unit/integration tests
+npm test                                  # 157 unit/integration tests
 node scripts/e2e-peruser.cjs              # end-to-end smoke (build first)
 ```
 

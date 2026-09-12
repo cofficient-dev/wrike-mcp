@@ -1,6 +1,7 @@
 import type { Express } from 'express';
 import { loadConfig } from './config.js';
 import { AuthManager } from './auth/authManager.js';
+import { AttachmentLinks } from './auth/attachmentLinks.js';
 import { EncryptedTokenStore } from './secrets/tokenStore.js';
 import { WrikeClient } from './wrikeClient.js';
 import { buildTools } from './tools/toolDefinitions.js';
@@ -16,13 +17,20 @@ async function main(): Promise<void> {
 
   const registry = createToolRegistry(buildTools());
 
+  // Signed get_attachment mode:'url' links, only available once this server
+  // knows its own public origin; undefined leaves signedDownloadUrl throwing
+  // a clear error rather than emitting a broken/relative URL.
+  const links = config.publicBaseUrl
+    ? new AttachmentLinks(config.tokenEncryptionKey, config.publicBaseUrl)
+    : undefined;
+
   // Each MCP session is bound to one user; tools run against that user's
   // Wrike credentials only.
   const sessionManager = new SessionManager((userId) =>
-    createMcpServer(registry, new WrikeClient(authManager, userId))
+    createMcpServer(registry, new WrikeClient(authManager, userId, fetch, links))
   );
 
-  const app: Express = createHttpApp({ config, authManager, sessionManager });
+  const app: Express = createHttpApp({ config, authManager, sessionManager, links });
 
   const server = app.listen(config.port, config.host, () => {
     // eslint-disable-next-line no-console

@@ -15,6 +15,10 @@ function mockClient() {
       contentType: 'image/png',
       filename: 'shot.png',
     }),
+    signedDownloadUrl: vi.fn().mockReturnValue({
+      url: 'https://mcp.example.com/wrike/attachments/IEAGIITRIMFWG6YH/file?token=abc',
+      expiresAt: '2026-01-01T00:15:00.000Z',
+    }),
   } as unknown as WrikeClient;
 }
 
@@ -179,7 +183,7 @@ describe('tool validation and dispatch', () => {
   });
 });
 describe('attachment download', () => {
-  it('get_attachment returns metadata only when download is not set', async () => {
+  it("get_attachment returns metadata only when mode is not set (defaults to 'metadata')", async () => {
     const client = mockClient();
     await byName('get_attachment').handler(client, { attachmentId: 'IEAGIITRIMFWG6YH' });
     const [path, params] = (client.get as ReturnType<typeof vi.fn>).mock.calls[0];
@@ -188,15 +192,21 @@ describe('attachment download', () => {
     expect(params).not.toHaveProperty('withUrl');
     expect(params).not.toHaveProperty('withUrls');
     expect(client.getBinary as ReturnType<typeof vi.fn>).not.toHaveBeenCalled();
+    expect(client.signedDownloadUrl as ReturnType<typeof vi.fn>).not.toHaveBeenCalled();
   });
 
-  it('get_attachment with download returns base64 file content', async () => {
+  it("get_attachment returns metadata only when mode: 'metadata' is explicit", async () => {
     const client = mockClient();
-    // The regression: `download` was accepted by the schema and silently
-    // dropped, so callers only ever got metadata back.
+    await byName('get_attachment').handler(client, { attachmentId: 'IEAGIITRIMFWG6YH', mode: 'metadata' });
+    expect(client.get as ReturnType<typeof vi.fn>).toHaveBeenCalledTimes(1);
+    expect(client.getBinary as ReturnType<typeof vi.fn>).not.toHaveBeenCalled();
+  });
+
+  it("get_attachment with mode: 'download' returns base64 file content plus a do-not-relay note", async () => {
+    const client = mockClient();
     const result = (await byName('get_attachment').handler(client, {
       attachmentId: 'IEAGIITRIMFWG6YH',
-      download: true,
+      mode: 'download',
     })) as Record<string, unknown>;
 
     const [path] = (client.getBinary as ReturnType<typeof vi.fn>).mock.calls[0];
@@ -206,11 +216,15 @@ describe('attachment download', () => {
     expect(result.contentType).toBe('image/png');
     expect(result.filename).toBe('shot.png');
     expect(result.size).toBe(8);
+    // The field the caller is already reading, telling it not to retype this
+    // content verbatim to a person and to use mode: 'url' instead.
+    expect(typeof result.note).toBe('string');
+    expect(result.note as string).toMatch(/mode: 'url'/);
   });
 
-  it('get_attachment passes a byte budget to getBinary so oversized files are rejected before buffering', async () => {
+  it("get_attachment passes a byte budget to getBinary for mode: 'download' so oversized files are rejected before buffering", async () => {
     const client = mockClient();
-    await byName('get_attachment').handler(client, { attachmentId: 'IEAGIITRIMFWG6YH', download: true });
+    await byName('get_attachment').handler(client, { attachmentId: 'IEAGIITRIMFWG6YH', mode: 'download' });
     const call = (client.getBinary as ReturnType<typeof vi.fn>).mock.calls[0];
     // Enforcement lives inside getBinary (Content-Length check, then a
     // streamed cutoff) precisely so an oversized body is never fully
@@ -218,29 +232,72 @@ describe('attachment download', () => {
     expect(call[3]).toBeGreaterThan(0);
   });
 
-  it('get_attachment turns BinaryTooLargeError into a message naming the alternative', async () => {
+  it("get_attachment turns BinaryTooLargeError into a message naming mode: 'url'", async () => {
     const client = mockClient();
     (client.getBinary as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
       new BinaryTooLargeError(6 * 1024 * 1024, 5 * 1024 * 1024)
     );
     await expect(
-      byName('get_attachment').handler(client, { attachmentId: 'IEAGIITRIMFWG6YH', download: true })
-    ).rejects.toThrow(/withUrls/);
+      byName('get_attachment').handler(client, { attachmentId: 'IEAGIITRIMFWG6YH', mode: 'download' })
+    ).rejects.toThrow(/mode: 'url'/);
   });
 
-  it('get_attachment lets a non-size error from getBinary pass through unchanged', async () => {
+  it("get_attachment lets a non-size error from getBinary pass through unchanged for mode: 'download'", async () => {
     const client = mockClient();
     (client.getBinary as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('network blip'));
     await expect(
-      byName('get_attachment').handler(client, { attachmentId: 'IEAGIITRIMFWG6YH', download: true })
+      byName('get_attachment').handler(client, { attachmentId: 'IEAGIITRIMFWG6YH', mode: 'download' })
     ).rejects.toThrow('network blip');
   });
 
-  it('get_attachment rejects the removed withUrl parameter', async () => {
+  it("get_attachment with mode: 'url' returns a signed URL and makes no Wrike HTTP call", async () => {
+    const client = mockClient();
+    const result = (await byName('get_attachment').handler(client, {
+      attachmentId: 'IEAGIITRIMFWG6YH',
+      mode: 'url',
+    })) as Record<string, unknown>;
+
+    expect(client.signedDownloadUrl as ReturnType<typeof vi.fn>).toHaveBeenCalledWith('IEAGIITRIMFWG6YH');
+    expect(result).toEqual({
+      attachmentId: 'IEAGIITRIMFWG6YH',
+      url: 'https://mcp.example.com/wrike/attachments/IEAGIITRIMFWG6YH/file?token=abc',
+      expiresAt: '2026-01-01T00:15:00.000Z',
+    });
+    // Minting a URL is purely local signing — no metadata GET, no binary download.
+    expect(client.get as ReturnType<typeof vi.fn>).not.toHaveBeenCalled();
+    expect(client.getBinary as ReturnType<typeof vi.fn>).not.toHaveBeenCalled();
+  });
+
+  it("get_attachment mode: 'url' surfaces a clear error when PUBLIC_BASE_URL is not configured", async () => {
+    const client = mockClient();
+    (client.signedDownloadUrl as ReturnType<typeof vi.fn>).mockImplementation(() => {
+      // What WrikeClient.signedDownloadUrl itself throws when unconfigured.
+      throw new Error(
+        "Signed download links are not available: this server has no PUBLIC_BASE_URL configured. " +
+        "Set PUBLIC_BASE_URL, or use mode: 'download' instead."
+      );
+    });
+    await expect(
+      byName('get_attachment').handler(client, { attachmentId: 'IEAGIITRIMFWG6YH', mode: 'url' })
+    ).rejects.toThrow(/PUBLIC_BASE_URL/);
+  });
+
+  it('get_attachment rejects an unknown key (strict schema)', async () => {
+    // Coverage for GetAttachmentSchema's .strict(): any unrecognized key must
+    // be rejected, not silently dropped.
     await expect(
       byName('get_attachment').handler(mockClient(), {
         attachmentId: 'IEAGIITRIMFWG6YH',
-        withUrl: true,
+        bogusField: true,
+      })
+    ).rejects.toThrow();
+  });
+
+  it('get_attachment rejects an invalid mode value', async () => {
+    await expect(
+      byName('get_attachment').handler(mockClient(), {
+        attachmentId: 'IEAGIITRIMFWG6YH',
+        mode: 'bogus',
       })
     ).rejects.toThrow();
   });
