@@ -3,9 +3,11 @@ import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { AuthManager } from './auth/authManager.js';
 import { OAuthStateManager, WRIKE_AUTHORIZE_URL, exchangeCodeForTokens, toStoredTokens } from './auth/oauth.js';
 import { McpOAuthServer, McpOauthError } from './auth/mcpOauth.js';
+import type { AttachmentLinks } from './auth/attachmentLinks.js';
 import { type AppConfig } from './config.js';
 import { redact, errorMessage, registerSecret } from './redact.js';
 import type { SessionManager } from './transport.js';
+import { WrikeClient } from './wrikeClient.js';
 
 /**
  * Web-exposed endpoints:
@@ -15,6 +17,7 @@ import type { SessionManager } from './transport.js';
  *   GET  /oauth/callback       — code exchange; issues the user's connection token (oauth mode)
  *   POST /revoke               — user removes their own connection
  *   ALL  /mcp                  — MCP Streamable HTTP (requires Bearer connection token)
+ *   GET  /attachments/:id/file — signed attachment download (get_attachment mode:'url'); both modes
  *
  * MCP-native OAuth (oauth mode with PUBLIC_BASE_URL set):
  *   GET  /.well-known/oauth-protected-resource[/<issuer path>]
@@ -53,6 +56,8 @@ export interface HttpServerDeps {
     authManager: AuthManager;
     sessionManager: SessionManager;
     fetchImpl?: typeof fetch;
+    /** Signer for /attachments/:id/file; undefined when PUBLIC_BASE_URL is not configured. */
+    links?: AttachmentLinks;
 }
 
 export function createHttpApp({
@@ -60,6 +65,7 @@ export function createHttpApp({
     authManager,
     sessionManager,
     fetchImpl = fetch,
+    links,
 }: HttpServerDeps): Express {
     const app = express();
     // Scrub the configured secret verbatim from any outgoing error text: the
@@ -245,6 +251,42 @@ export function createHttpApp({
         if (!token) return undefined;
         return authManager.resolveConnectionToken(token);
     }
+
+    // --- Signed attachment download (get_attachment mode:'url') ------------
+    // Registered UNCONDITIONALLY (not inside the oauth-mode block below) so
+    // it works in pat mode too. Intentionally unauthenticated by any Bearer
+    // header: the signed token in the query string IS the credential, since
+    // the browser opening this link has no MCP connection token to send.
+    app.get('/attachments/:id/file', rateLimit(60), async (req, res) => {
+        const attachmentId = typeof req.params.id === 'string' ? req.params.id : undefined;
+        const token = typeof req.query.token === 'string' ? req.query.token : undefined;
+        // No signer configured (PUBLIC_BASE_URL unset), or no token/id at
+        // all: there is nothing to verify, so this route does not exist.
+        if (!links || !token || !attachmentId) {
+            res.status(404).json({ error: 'not_found' });
+            return;
+        }
+        const userId = links.verify(token, attachmentId);
+        if (!userId) {
+            // Deliberately generic: does not distinguish expired, tampered,
+            // or cross-attachment tokens, and never echoes the token back.
+            res.status(403).json({ error: 'invalid_or_expired_token' });
+            return;
+        }
+        try {
+            const client = new WrikeClient(authManager, userId, fetchImpl);
+            // No MAX_INLINE_DOWNLOAD_BYTES here: that cap exists only because
+            // an MCP tool response carries base64 inline; a direct browser
+            // download has no such limit, and lifting it for large files is
+            // exactly why this route exists.
+            const file = await client.getBinary(`/attachments/${attachmentId}/download`);
+            res.set('Content-Type', file.contentType);
+            res.set('Content-Disposition', contentDispositionHeader(file.filename));
+            res.send(file.data);
+        } catch (err) {
+            res.status(502).json({ error: 'download_failed', errorDescription: redact(errorMessage(err)) });
+        }
+    });
 
     if (config.auth.mode === 'oauth') {
         const oauthAuth = config.auth;
@@ -481,6 +523,23 @@ export function createHttpApp({
     });
 
     return app;
+}
+
+/**
+ * Builds a Content-Disposition header so the browser saves the download
+ * under the attachment's real name. Sends both an ASCII quoted-string
+ * fallback and an RFC 5987 filename* ext-value, mirroring the two forms
+ * wrikeClient.ts's own parser (dispositionFilename) already has to handle
+ * coming the other way. Falls back to a bare "attachment" when Wrike sent
+ * no filename at all.
+ */
+function contentDispositionHeader(filename?: string): string {
+    if (!filename) return 'attachment';
+    // Strips CR/LF and anything non-ASCII from the quoted fallback (header
+    // injection and encoding both ruled out at once); the filename* form
+    // carries the exact name via percent-encoding for clients that read it.
+    const ascii = filename.replace(/[^\x20-\x7E]/g, '_').replace(/"/g, '\\"');
+    return `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(filename)}`;
 }
 
 /** User-slot suffix. Crypto RNG: Math.random is predictable across requests. */

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { WrikeClient, WrikeApiError, BinaryTooLargeError } from '../src/wrikeClient.js';
 import { AuthManager } from '../src/auth/authManager.js';
+import { AttachmentLinks } from '../src/auth/attachmentLinks.js';
 import { EncryptedTokenStore } from '../src/secrets/tokenStore.js';
 import type { OAuthConfig, PatConfig } from '../src/config.js';
 import { tmpdir } from 'node:os';
@@ -422,5 +423,34 @@ describe('Content-Disposition filename forms', () => {
   it('keeps an escaped quote as one quote character', async () => {
     const out = await withDisposition('attachment; filename="say \\"hi\\".pdf"')();
     expect(out.filename).toBe('say "hi".pdf');
+  });
+});
+
+describe('WrikeClient.signedDownloadUrl', () => {
+  it('returns an absolute URL bound to this user and attachment, plus its real expiry', async () => {
+    const manager = new AuthManager(patConfig, store);
+    const links = new AttachmentLinks(randomBytes(32), 'https://mcp.example.com/wrike');
+    const client = new WrikeClient(manager, AuthManager.PAT_USER_ID, fetch, links);
+
+    const before = Date.now();
+    const { url, expiresAt } = client.signedDownloadUrl('IEAGIITRIMFWG6YH');
+
+    expect(url).toMatch(
+      /^https:\/\/mcp\.example\.com\/wrike\/attachments\/IEAGIITRIMFWG6YH\/file\?token=/
+    );
+    const token = new URL(url).searchParams.get('token');
+    expect(token).toBeTruthy();
+    // No Wrike call: minting a link is purely local signing.
+    expect(links.verify(token!, 'IEAGIITRIMFWG6YH')).toBe(AuthManager.PAT_USER_ID);
+    // expiresAt must reflect AttachmentLinks' own TTL, not a value the
+    // caller derived from a separately-duplicated constant.
+    expect(new Date(expiresAt).getTime()).toBeGreaterThan(before);
+    expect(new Date(expiresAt).getTime()).toBeLessThanOrEqual(before + links.ttlMs + 1000);
+  });
+
+  it('throws naming PUBLIC_BASE_URL when no signer is configured', async () => {
+    const manager = new AuthManager(patConfig, store);
+    const client = new WrikeClient(manager, AuthManager.PAT_USER_ID);
+    expect(() => client.signedDownloadUrl('IEAGIITRIMFWG6YH')).toThrow(/PUBLIC_BASE_URL/);
   });
 });

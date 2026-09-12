@@ -191,7 +191,9 @@ export function buildTools(): ToolDefinition[] {
         ),
         def(
             'list_attachments',
-            'List attachments on a task or folder. Set withUrls for a download URL valid 24h.',
+            "List attachments on a task or folder. Set withUrls for a Wrike-hosted download URL valid 24h. " +
+            "To hand a single attachment to a person, prefer get_attachment with mode: 'url' instead " +
+            "(this server's own short-lived link, no Wrike round trip to mint).",
             S.ListAttachmentsSchema,
             (c, p) =>
                 c.get(
@@ -203,18 +205,29 @@ export function buildTools(): ToolDefinition[] {
         ),
         def(
             'get_attachment',
-            'Get an attachment by ID. Metadata by default; set download for the file content, base64-encoded.',
+            "Get an attachment by ID. mode: 'metadata' (default) returns metadata only. " +
+            "mode: 'url' returns a short-lived signed download link for a person to open in a browser " +
+            "(needs PUBLIC_BASE_URL; makes no Wrike API call). mode: 'download' returns the file content " +
+            "base64-encoded for a program to consume directly — never use it to relay a file to a person " +
+            "in a chat reply.",
             S.GetAttachmentSchema,
             async (c, p) => {
-                if (!p.download) {
+                const mode = p.mode ?? 'metadata';
+                if (mode === 'metadata') {
                     // GET /attachments/{ids} takes a comma-separated list and
                     // supports only `versions` — no URL-bearing parameter.
                     return c.get(`/attachments/${p.attachmentId}`, query({ versions: p.versions }));
                 }
-                // The byte budget is enforced inside getBinary (Content-Length
-                // check, then a streamed cutoff) rather than measured after the
-                // fact — a 100MB attachment must not be fully buffered before
-                // this limit has a chance to reject it.
+                if (mode === 'url') {
+                    // Signed locally, so this never touches the Wrike API.
+                    const { url, expiresAt } = c.signedDownloadUrl(p.attachmentId);
+                    return { attachmentId: p.attachmentId, url, expiresAt };
+                }
+                // mode === 'download'. The byte budget is enforced inside
+                // getBinary (Content-Length check, then a streamed cutoff)
+                // rather than measured after the fact — a 100MB attachment
+                // must not be fully buffered before this limit has a chance
+                // to reject it.
                 let file;
                 try {
                     file = await c.getBinary(`/attachments/${p.attachmentId}/download`, {}, 0, MAX_INLINE_DOWNLOAD_BYTES);
@@ -222,7 +235,7 @@ export function buildTools(): ToolDefinition[] {
                     if (err instanceof BinaryTooLargeError) {
                         throw new Error(
                             `Attachment is over the ${MAX_INLINE_DOWNLOAD_BYTES}-byte inline limit. ` +
-                            `Use list_attachments with withUrls to get a download URL valid for 24 hours instead.`
+                            `Use mode: 'url' to get a short-lived download link instead.`
                         );
                     }
                     throw err;
@@ -234,6 +247,11 @@ export function buildTools(): ToolDefinition[] {
                     size: file.data.byteLength,
                     encoding: 'base64',
                     content: file.data.toString('base64'),
+                    note:
+                        "This is base64 file content for a program to consume, not for you to retype. " +
+                        "Do not reproduce it verbatim in a chat reply — that is unreliable at this length " +
+                        "and a corrupted copy is a silent failure. To hand this file to a person, call " +
+                        "get_attachment again with mode: 'url'.",
                 };
             }
         ),

@@ -1,5 +1,6 @@
 import type { AuthManager, UserId } from './auth/authManager.js';
 import { AuthError } from './auth/authManager.js';
+import type { AttachmentLinks } from './auth/attachmentLinks.js';
 
 export interface WrikeResponse<T> {
   kind: string;
@@ -123,7 +124,9 @@ export class WrikeClient {
   constructor(
     private readonly authManager: AuthManager,
     private readonly userId: UserId,
-    private readonly fetchImpl: HttpFetch = fetch
+    private readonly fetchImpl: HttpFetch = fetch,
+    /** Signer for get_attachment mode:'url'; undefined when PUBLIC_BASE_URL is not configured. */
+    private readonly links?: AttachmentLinks
   ) {}
 
   /**
@@ -305,6 +308,32 @@ export class WrikeClient {
       contentType: res.headers.get('Content-Type') ?? 'application/octet-stream',
       ...(filename !== undefined ? { filename } : {}),
     };
+  }
+
+  /**
+   * Mints a short-lived signed URL that lets a browser download this
+   * attachment directly from this server's `/attachments/:id/file` route,
+   * bound to this client's user. Backs `get_attachment` `mode: 'url'`.
+   *
+   * Makes no Wrike API call — the link is signed locally — and this is the
+   * only place `userId` (private, and not otherwise reachable from a tool
+   * handler) needs to be bound into a token.
+   *
+   * Throws rather than emitting a broken/relative URL when no signer is
+   * configured, i.e. `PUBLIC_BASE_URL` is not set on this server.
+   */
+  signedDownloadUrl(attachmentId: string): { url: string; expiresAt: string } {
+    if (!this.links) {
+      throw new Error(
+        "Signed download links are not available: this server has no PUBLIC_BASE_URL configured. " +
+        "Set PUBLIC_BASE_URL, or use mode: 'download' instead."
+      );
+    }
+    const url = this.links.issue(this.userId, attachmentId);
+    // ttlMs lives only on AttachmentLinks so this can never drift from the
+    // TTL actually baked into the token above.
+    const expiresAt = new Date(Date.now() + this.links.ttlMs).toISOString();
+    return { url, expiresAt };
   }
 
   // --- Convenience wrappers ---------------------------------------------------
