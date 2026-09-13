@@ -340,10 +340,13 @@ describe('GET /attachments/:id/file (signed download)', () => {
     });
     await new Promise((r) => setTimeout(r, 50));
 
+    // Assert something was actually caught before asserting what it was:
+    // comparing a derived list against itself passes trivially on an empty
+    // array, so without this guard the check below would silently prove
+    // nothing on any run where the abort lands after the response completes.
+    expect(clientErrors.length).toBeGreaterThan(0);
     // The deliberate abort is the only failure this test tolerates.
-    expect(clientErrors.map((e) => e.code)).toEqual(
-      clientErrors.map(() => 'ECONNRESET')
-    );
+    expect([...new Set(clientErrors.map((e) => e.code))]).toEqual(['ECONNRESET']);
     expect(cancelled).toBe(true);
   });
 
