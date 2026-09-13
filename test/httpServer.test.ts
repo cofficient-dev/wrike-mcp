@@ -332,6 +332,26 @@ describe('GET /attachments/:id/file (signed download)', () => {
     expect(cancelled).toBe(true);
   });
 
+  it('refuses an attachment id that does not match the expected shape', async () => {
+    // Defense in depth: the id is interpolated into a Wrike API path on an
+    // unauthenticated route. A correctly signed token is used here — issue()
+    // itself does not validate shape — so this proves the route's own check
+    // fires rather than the HMAC merely failing.
+    const config = configWithPublicBaseUrl();
+    const links = new AttachmentLinks(config.tokenEncryptionKey, config.publicBaseUrl!);
+    const fetchImpl = binaryFetch('BYTES');
+    const { app } = makeApp(config, { fetchImpl: fetchImpl as unknown as typeof fetch, links });
+
+    const oddId = '../../../account';
+    const token = new URL(links.issue(AuthManager.PAT_USER_ID, oddId)).searchParams.get('token')!;
+    const res = await request(app)
+      .get(`/attachments/${encodeURIComponent(oddId)}/file?token=${encodeURIComponent(token)}`);
+
+    expect(res.status).toBe(404);
+    // Nothing was fetched from Wrike.
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
   it('marks the response private and uncacheable', async () => {
     // Private file bytes authorised by a URL-borne credential: a shared or
     // intermediary cache must not be left to its own heuristics about them.

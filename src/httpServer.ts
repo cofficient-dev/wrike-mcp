@@ -52,6 +52,9 @@ import { WrikeClient } from './wrikeClient.js';
  */
 const CONSENT_COOKIE_BASE = 'wrike_mcp_consent';
 
+/** Wrike attachment id shape, kept in step with GetAttachmentSchema. */
+const ATTACHMENT_ID = /^[A-Z0-9]{16}$/;
+
 export interface HttpServerDeps {
     config: AppConfig;
     authManager: AuthManager;
@@ -263,7 +266,14 @@ export function createHttpApp({
         const token = typeof req.query.token === 'string' ? req.query.token : undefined;
         // No signer configured (PUBLIC_BASE_URL unset), or no token/id at
         // all: there is nothing to verify, so this route does not exist.
-        if (!links || !token || !attachmentId) {
+        //
+        // The id shape is checked as well, mirroring GetAttachmentSchema. Not
+        // reachable today — the token's HMAC binds one exact id, and ids are
+        // only minted through that schema — but this id is interpolated into a
+        // Wrike API path on an intentionally unauthenticated route, so it is
+        // worth refusing an odd one here rather than relying on every future
+        // caller of issue() to have validated first.
+        if (!links || !token || !attachmentId || !ATTACHMENT_ID.test(attachmentId)) {
             res.status(404).json({ error: 'not_found' });
             return;
         }

@@ -250,21 +250,17 @@ export class WrikeClient {
   }
 
   /**
-   * Fetches a binary body (attachment content) rather than JSON.
-   *
-   * Every other call funnels through res.json(); GET /attachments/{id}/download
-   * answers application/octet-stream, so parsing it as JSON would throw and the
-   * bytes would be lost. Errors still come back as JSON, so those are decoded
-   * on the failure path exactly as elsewhere.
-   */
-  /**
-   * Issues the authenticated GET and applies the shared 401/429 recovery,
-   * handing back the raw Response with its body still unread.
+   * Issues the authenticated GET for a binary endpoint and applies the shared
+   * 401/429 recovery, handing back the raw Response with its body unread.
    *
    * Split out so the buffering path (getBinary) and the streaming path
    * (getBinaryStream) share one copy of the auth, retry and error handling
    * rather than growing a second near-copy — the same duplication that once
    * let the missing body-cancel bug exist in two places at once.
+   *
+   * A failed response still carries JSON, so the error path decodes it exactly
+   * as the JSON requests do; only the success path differs, which is why the
+   * body is left untouched here for the caller to buffer or stream.
    */
   private async fetchBinary(path: string, params: QueryParams, attempt: number): Promise<Response> {
     const host = await this.authManager.getHost(this.userId);
@@ -317,6 +313,15 @@ export class WrikeClient {
     };
   }
 
+  /**
+   * Fetches a binary body into memory, optionally bounded by `maxBytes`.
+   *
+   * Every other call funnels through res.json(); GET /attachments/{id}/download
+   * answers application/octet-stream, so parsing it as JSON would throw and the
+   * bytes would be lost. Use this where the whole payload is needed at once and
+   * something bounds its size — the MCP inline path, which is capped by
+   * MAX_INLINE_DOWNLOAD_BYTES. Where there is no such cap, use getBinaryStream.
+   */
   async getBinary(
     path: string,
     params: QueryParams = {},
