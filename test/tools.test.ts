@@ -193,7 +193,7 @@ describe('tool validation and dispatch', () => {
       ).rejects.toThrow();
     });
 
-    it('sends a bounded default pageSize when the caller gives neither pageSize nor limit', async () => {
+    it('sends a bounded default pageSize when the caller gives no pageSize', async () => {
       const client = mockClient();
       await byName('list_timelogs').handler(client, {});
       const [, params] = (client.get as ReturnType<typeof vi.fn>).mock.calls[0] as unknown as [
@@ -214,7 +214,22 @@ describe('tool validation and dispatch', () => {
       expect(params.pageSize).toBe(50);
     });
 
-    it("respects the caller's own limit instead of adding a default pageSize", async () => {
+    it('still bounds the response when only limit is given', async () => {
+      // Only pageSize bounds a single response; limit caps the total across
+      // pages. Keying the default on "neither given" let limit suppress it, so
+      // a large limit reproduced the whole-account response this is here to
+      // prevent.
+      const client = mockClient();
+      await byName('list_timelogs').handler(client, { limit: 100000 });
+      const [, params] = (client.get as ReturnType<typeof vi.fn>).mock.calls[0] as unknown as [
+        string,
+        Record<string, unknown>,
+      ];
+      expect(params.limit).toBe(100000);
+      expect(params.pageSize).toBe(200);
+    });
+
+    it('passes a small caller limit through alongside the default pageSize', async () => {
       const client = mockClient();
       await byName('list_timelogs').handler(client, { limit: 10 });
       const [, params] = (client.get as ReturnType<typeof vi.fn>).mock.calls[0] as unknown as [
@@ -222,7 +237,17 @@ describe('tool validation and dispatch', () => {
         Record<string, unknown>,
       ];
       expect(params.limit).toBe(10);
-      expect(params).not.toHaveProperty('pageSize');
+      expect(params.pageSize).toBe(200);
+    });
+
+    it('rejects a folderId or taskId shaped like a path traversal', async () => {
+      // Both are interpolated into the request path by the handler.
+      await expect(
+        byName('list_timelogs').handler(mockClient(), { folderId: '../../account' })
+      ).rejects.toThrow();
+      await expect(
+        byName('list_timelogs').handler(mockClient(), { taskId: 'a/b' })
+      ).rejects.toThrow();
     });
 
     it('sends trackedDate as a range object, not loose startDate/endDate params', async () => {

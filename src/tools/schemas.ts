@@ -353,8 +353,11 @@ export const TimelogApprovalStatusSchema = z.enum([
  */
 export const ListTimelogsSchema = z
   .object({
-    folderId: z.string().optional(),
-    taskId: z.string().optional(),
+    // Path-interpolated by the handler, so they get the same guard as every
+    // other id here: WrikeIdSchema keeps separators and traversal sequences
+    // out of an id that becomes part of a request path.
+    folderId: WrikeIdSchema.optional(),
+    taskId: WrikeIdSchema.optional(),
     createdDate: InstantRangeSchema.optional(),
     updatedDate: InstantRangeSchema.optional(),
     trackedDate: LocalDateTimeRangeSchema.optional(),

@@ -285,22 +285,29 @@ export function buildTools(): ToolDefinition[] {
             'list_timelogs',
             `List timelogs with documented filters (createdDate/updatedDate/trackedDate ranges, ` +
                 `timelogCategories, exportStatuses, billingTypes, approvalStatuses, me, descendants). ` +
-                `Results are paginated: defaults to pageSize ${DEFAULT_TIMELOG_PAGE_SIZE} when neither ` +
-                `pageSize nor limit is given (Wrike returns the entire account's timelog history in one ` +
-                `response otherwise), use nextPageToken to continue. folderId/taskId route to that folder's ` +
-                `or task's timelogs instead of filtering the account-wide endpoint.`,
+                `Results are paginated: defaults to pageSize ${DEFAULT_TIMELOG_PAGE_SIZE} whenever pageSize ` +
+                `is not given (Wrike returns the entire account's timelog history in one response ` +
+                `otherwise), use nextPageToken to continue. limit caps the total across pages and does ` +
+                `not bound a single response. folderId/taskId route to that folder's or task's timelogs ` +
+                `instead of filtering the account-wide endpoint.`,
             S.ListTimelogsSchema,
             (c, p) => {
                 const { folderId, taskId, limit, pageSize, ...rest } = p;
-                // Wrike's own docs are explicit: omitting both pageSize and limit
-                // returns every matching timelog in a single response — a live
-                // sweep saw ~257,000 lines from one unfiltered call. Bound it by
-                // default; an explicit caller value is passed through untouched.
-                const bounded =
-                    limit === undefined && pageSize === undefined
-                        ? { pageSize: DEFAULT_TIMELOG_PAGE_SIZE }
-                        : { limit, pageSize };
-                const params = query({ ...rest, ...bounded });
+                // Wrike's own docs are explicit: omit pageSize and every matching
+                // timelog comes back in a single response — a live sweep saw
+                // ~257,000 lines from one unfiltered call.
+                //
+                // Only pageSize bounds the size of a response; `limit` caps the
+                // total across pages and does nothing to how much arrives at
+                // once. So the default is keyed on pageSize alone: keying it on
+                // "neither given" meant `limit: 100000` suppressed the default
+                // and reproduced the very problem this bounds. An explicit
+                // pageSize is passed through untouched.
+                const params = query({
+                    ...rest,
+                    limit,
+                    pageSize: pageSize ?? DEFAULT_TIMELOG_PAGE_SIZE,
+                });
                 if (folderId) return c.get(`/folders/${folderId}/timelogs`, params);
                 if (taskId) return c.get(`/tasks/${taskId}/timelogs`, params);
                 return c.get('/timelogs', params);
