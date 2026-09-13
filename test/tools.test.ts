@@ -240,6 +240,30 @@ describe('tool validation and dispatch', () => {
       expect(params.pageSize).toBe(200);
     });
 
+    it('does not inject a default pageSize onto a nextPageToken continuation', async () => {
+      // The token resumes an already-paged query and carries that context —
+      // Wrike's docs say pageSize "can be omitted in this case". Injecting a
+      // default would silently re-page a caller who started with another size.
+      const client = mockClient();
+      await byName('list_timelogs').handler(client, { nextPageToken: 'tok123' });
+      const [, params] = (client.get as ReturnType<typeof vi.fn>).mock.calls[0] as unknown as [
+        string,
+        Record<string, unknown>,
+      ];
+      expect(params.nextPageToken).toBe('tok123');
+      expect(params).not.toHaveProperty('pageSize');
+    });
+
+    it("still honours an explicit pageSize alongside a continuation token", async () => {
+      const client = mockClient();
+      await byName('list_timelogs').handler(client, { nextPageToken: 'tok123', pageSize: 500 });
+      const [, params] = (client.get as ReturnType<typeof vi.fn>).mock.calls[0] as unknown as [
+        string,
+        Record<string, unknown>,
+      ];
+      expect(params.pageSize).toBe(500);
+    });
+
     it('rejects folderId and taskId together rather than silently preferring one', async () => {
       // They select different endpoints; preferring folderId would return
       // folder-scoped results that read as task-scoped.

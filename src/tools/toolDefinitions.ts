@@ -314,11 +314,17 @@ export function buildTools(): ToolDefinition[] {
                 // "neither given" meant `limit: 100000` suppressed the default
                 // and reproduced the very problem this bounds. An explicit
                 // pageSize is passed through untouched.
-                const params = query({
-                    ...rest,
-                    limit,
-                    pageSize: pageSize ?? DEFAULT_TIMELOG_PAGE_SIZE,
-                });
+                // Not applied to a continuation: nextPageToken resumes a query
+                // that was already paged, and Wrike's docs say pageSize "can be
+                // omitted in this case" — the token carries that context.
+                // Injecting a default there would silently re-page a caller who
+                // started with a different size, so the default only bounds an
+                // initial request, which is the unbounded one it exists for.
+                const bounded =
+                    pageSize === undefined && rest.nextPageToken === undefined
+                        ? DEFAULT_TIMELOG_PAGE_SIZE
+                        : pageSize;
+                const params = query({ ...rest, limit, pageSize: bounded });
                 if (folderId) return c.get(`/folders/${folderId}/timelogs`, params);
                 if (taskId) return c.get(`/tasks/${taskId}/timelogs`, params);
                 return c.get('/timelogs', params);

@@ -198,7 +198,7 @@ export const GetTaskSchema = z
   })
   .strict();
 
-export const DeleteTaskSchema = z.object({ taskId: z.string() }).strict();
+export const DeleteTaskSchema = z.object({ taskId: WrikeIdSchema }).strict();
 
 /** Wrike has no unified search endpoint; `search` fans out to one GET per target. */
 export const SearchTargetSchema = z.enum(['tasks', 'folders', 'contacts']);
@@ -286,7 +286,7 @@ export const UpdateFolderSchema = z
   })
   .strict();
 
-export const DeleteFolderSchema = z.object({ folderId: z.string() }).strict();
+export const DeleteFolderSchema = z.object({ folderId: WrikeIdSchema }).strict();
 
 // --- Comments ----------------------------------------------------------------
 
@@ -415,7 +415,7 @@ export const UpdateTimelogSchema = z
   })
   .strict();
 
-export const DeleteTimelogSchema = z.object({ timelogId: z.string() }).strict();
+export const DeleteTimelogSchema = z.object({ timelogId: WrikeIdSchema }).strict();
 
 // --- Attachments -------------------------------------------------------------
 
@@ -471,6 +471,6 @@ export const GetAttachmentSchema = z
   })
   .strict();
 
-export const DeleteAttachmentSchema = z.object({ attachmentId: z.string() }).strict();
+export const DeleteAttachmentSchema = z.object({ attachmentId: WrikeIdSchema }).strict();
 
 export const GetTimelogsSchema = ListTimelogsSchema;

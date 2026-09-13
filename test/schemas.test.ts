@@ -1,6 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import { WrikeIdSchema } from '../src/tools/schemas.js';
 import { buildTools } from '../src/tools/toolDefinitions.js';
+import { vi } from 'vitest';
+import type { WrikeClient } from '../src/wrikeClient.js';
+
+const mockDeleteClient = () =>
+  ({ delete: vi.fn().mockResolvedValue({ kind: 'ok', data: [] }) }) as unknown as WrikeClient;
 
 describe('WrikeIdSchema', () => {
   it('accepts a legacy 16-char uppercase+digit id', () => {
@@ -65,4 +70,28 @@ describe('tool input schemas stay plain ZodObjects', () => {
       ).toBeDefined();
     }
   });
+});
+
+describe('delete schemas guard path-interpolated ids', () => {
+  // Every delete handler builds a path (`/folders/${id}`, `/tasks/${id}`,
+  // `/timelogs/${id}`, `/attachments/${id}`), so these need the same guard as
+  // every other id — they were the last plain z.string() ids in the file.
+  const cases: [string, string][] = [
+    ['delete_folder', 'folderId'],
+    ['delete_task', 'taskId'],
+    ['delete_timelog', 'timelogId'],
+    ['delete_attachment', 'attachmentId'],
+  ];
+
+  for (const [tool, field] of cases) {
+    it(`${tool} rejects a traversal-shaped ${field} but accepts a real id`, async () => {
+      const t = buildTools().find((x) => x.name === tool)!;
+      await expect(t.handler(mockDeleteClient(), { [field]: '../../account' })).rejects.toThrow();
+      await expect(t.handler(mockDeleteClient(), { [field]: 'a/b' })).rejects.toThrow();
+      // New-format mixed-case id must still pass — deletes were the one path
+      // that kept working during the live sweep precisely because they were
+      // unvalidated, so tightening them must not undo that.
+      await expect(t.handler(mockDeleteClient(), { [field]: 'MQAAAAEPpWtv' })).resolves.toBeDefined();
+    });
+  }
 });
