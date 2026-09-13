@@ -368,6 +368,14 @@ export const ListTimelogsSchema = z
     exportStatuses: z.array(TimelogExportStatusSchema).optional(),
     billingTypes: z.array(TimelogBillingTypeSchema).optional(),
     approvalStatuses: z.array(TimelogApprovalStatusSchema).optional(),
+    // Bounds taken from Wrike's GET /timelogs reference, not invented:
+    // pageSize is documented as 1-1000, so it is capped there. `limit` is
+    // documented only as "Total record limit" with no ceiling, so none is
+    // imposed — a .max() here would be a guess, and guessing at the API
+    // contract is what produced the bugs this file is being fixed for.
+    // Response size is bounded by the default pageSize the handler sends
+    // (see list_timelogs), which is what actually governs a single response;
+    // limit only caps the total across pages.
     limit: z.number().int().positive().optional(),
     pageSize: z.number().int().positive().max(1000).optional(),
     nextPageToken: z.string().optional(),
