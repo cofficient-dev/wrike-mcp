@@ -311,13 +311,62 @@ export const CreateTimelogSchema = z
   })
   .strict();
 
+/**
+ * `createdDate` / `updatedDate` filter shape (Wrike `InstantRange`: full
+ * timestamp, no exact-match shorthand — set `start` and `end` to the same
+ * value for that). See https://developers.wrike.com/api/v4/timelogs/.
+ */
+export const InstantRangeSchema = z.object({ start: z.string().optional(), end: z.string().optional() }).strict();
+
+/**
+ * `trackedDate` filter shape (Wrike `LocalDateTimeRange`: calendar
+ * date/time; `equal` is the exact-match shorthand, distinct from
+ * `InstantRangeSchema` above). See https://developers.wrike.com/api/v4/timelogs/.
+ */
+export const LocalDateTimeRangeSchema = z
+  .object({ equal: z.string().optional(), start: z.string().optional(), end: z.string().optional() })
+  .strict();
+
+export const TimelogExportStatusSchema = z.enum(['NotExported', 'Exported', 'ReadyForExport']);
+export const TimelogBillingTypeSchema = z.enum(['Billable', 'NonBillable']);
+export const TimelogApprovalStatusSchema = z.enum([
+  'Draft',
+  'NotRequired',
+  'Approved',
+  'Rejected',
+  'Cancelled',
+  'Pending',
+]);
+
+/**
+ * Filters for `GET /timelogs` (and the folder-/task-scoped variants this
+ * tool routes to). A live sweep found the previous shape — `contactIds`,
+ * `startDate`, `endDate` — all rejected live with
+ * "400 (invalid_request): Parameter '<name>' is not allowed", and an
+ * unfiltered call returning the account's entire timelog history (~257,000
+ * lines) in one response, because Wrike's docs are explicit that omitting
+ * `pageSize`/`limit` returns everything in a single response. This schema
+ * keeps only the parameters GET /timelogs documents; `folderId`/`taskId` are
+ * not among them but are accepted here because the tool handler uses them to
+ * route to `/folders/{folderId}/timelogs` / `/tasks/{taskId}/timelogs`
+ * instead of adding them as query params on `/timelogs` itself.
+ */
 export const ListTimelogsSchema = z
   .object({
     folderId: z.string().optional(),
-    contactIds: z.array(z.string()).optional(),
-    categories: z.array(z.string()).optional(),
-    startDate: z.string().optional(),
-    endDate: z.string().optional(),
+    taskId: z.string().optional(),
+    createdDate: InstantRangeSchema.optional(),
+    updatedDate: InstantRangeSchema.optional(),
+    trackedDate: LocalDateTimeRangeSchema.optional(),
+    me: z.boolean().optional(),
+    descendants: z.boolean().optional(),
+    plainText: z.boolean().optional(),
+    timelogCategories: z.array(z.string()).optional(),
+    exportStatuses: z.array(TimelogExportStatusSchema).optional(),
+    billingTypes: z.array(TimelogBillingTypeSchema).optional(),
+    approvalStatuses: z.array(TimelogApprovalStatusSchema).optional(),
+    limit: z.number().int().positive().optional(),
+    pageSize: z.number().int().positive().max(1000).optional(),
     nextPageToken: z.string().optional(),
     fields: z.array(z.string()).optional(),
   })

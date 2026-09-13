@@ -153,11 +153,105 @@ describe('tool validation and dispatch', () => {
     ).rejects.toThrow();
   });
 
-  it('list_timelogs scopes to folder when folderId given', async () => {
-    const client = mockClient();
-    await byName('list_timelogs').handler(client, { folderId: 'IEAGIITR', startDate: '2026-01-01' });
-    const [path] = (client.get as ReturnType<typeof vi.fn>).mock.calls[0] as unknown as [string];
-    expect(path).toBe('/folders/IEAGIITR/timelogs');
+  describe('list_timelogs', () => {
+    // Live sweep found: contactIds -> "Parameter 'contactIds' is not
+    // allowed"; startDate -> "Parameter 'startDate' is not allowed"; an
+    // unfiltered call returned the account's entire timelog history
+    // (~257,000 lines) in one response because Wrike returns everything
+    // when neither pageSize nor limit is given.
+
+    it('scopes to folder when folderId is given', async () => {
+      const client = mockClient();
+      await byName('list_timelogs').handler(client, { folderId: 'IEAGIITR' });
+      const [path] = (client.get as ReturnType<typeof vi.fn>).mock.calls[0] as unknown as [string];
+      expect(path).toBe('/folders/IEAGIITR/timelogs');
+    });
+
+    it('scopes to task when taskId is given', async () => {
+      const client = mockClient();
+      await byName('list_timelogs').handler(client, { taskId: 'TASK1234' });
+      const [path] = (client.get as ReturnType<typeof vi.fn>).mock.calls[0] as unknown as [string];
+      expect(path).toBe('/tasks/TASK1234/timelogs');
+    });
+
+    it('hits the account-wide endpoint when neither folderId nor taskId is given', async () => {
+      const client = mockClient();
+      await byName('list_timelogs').handler(client, {});
+      const [path] = (client.get as ReturnType<typeof vi.fn>).mock.calls[0] as unknown as [string];
+      expect(path).toBe('/timelogs');
+    });
+
+    it('rejects the removed contactIds, startDate, endDate params', async () => {
+      await expect(
+        byName('list_timelogs').handler(mockClient(), { contactIds: ['KUABHKOF'] })
+      ).rejects.toThrow();
+      await expect(
+        byName('list_timelogs').handler(mockClient(), { startDate: '2026-01-01' })
+      ).rejects.toThrow();
+      await expect(
+        byName('list_timelogs').handler(mockClient(), { endDate: '2026-01-01' })
+      ).rejects.toThrow();
+    });
+
+    it('sends a bounded default pageSize when the caller gives neither pageSize nor limit', async () => {
+      const client = mockClient();
+      await byName('list_timelogs').handler(client, {});
+      const [, params] = (client.get as ReturnType<typeof vi.fn>).mock.calls[0] as unknown as [
+        string,
+        Record<string, unknown>,
+      ];
+      expect(params.pageSize).toBe(200);
+      expect(params).not.toHaveProperty('limit');
+    });
+
+    it("respects the caller's own pageSize instead of overriding it", async () => {
+      const client = mockClient();
+      await byName('list_timelogs').handler(client, { pageSize: 50 });
+      const [, params] = (client.get as ReturnType<typeof vi.fn>).mock.calls[0] as unknown as [
+        string,
+        Record<string, unknown>,
+      ];
+      expect(params.pageSize).toBe(50);
+    });
+
+    it("respects the caller's own limit instead of adding a default pageSize", async () => {
+      const client = mockClient();
+      await byName('list_timelogs').handler(client, { limit: 10 });
+      const [, params] = (client.get as ReturnType<typeof vi.fn>).mock.calls[0] as unknown as [
+        string,
+        Record<string, unknown>,
+      ];
+      expect(params.limit).toBe(10);
+      expect(params).not.toHaveProperty('pageSize');
+    });
+
+    it('sends trackedDate as a range object, not loose startDate/endDate params', async () => {
+      const client = mockClient();
+      await byName('list_timelogs').handler(client, {
+        trackedDate: { start: '2026-01-01T00:00:00', end: '2026-01-31T23:59:59' },
+      });
+      const [, params] = (client.get as ReturnType<typeof vi.fn>).mock.calls[0] as unknown as [
+        string,
+        Record<string, unknown>,
+      ];
+      expect(JSON.parse(params.trackedDate as string)).toEqual({
+        start: '2026-01-01T00:00:00',
+        end: '2026-01-31T23:59:59',
+      });
+    });
+
+    it('accepts the documented filters (timelogCategories, exportStatuses, billingTypes, approvalStatuses, me, descendants)', async () => {
+      await expect(
+        byName('list_timelogs').handler(mockClient(), {
+          timelogCategories: ['CAT1'],
+          exportStatuses: ['Exported'],
+          billingTypes: ['Billable'],
+          approvalStatuses: ['Approved'],
+          me: true,
+          descendants: false,
+        })
+      ).resolves.toBeDefined();
+    });
   });
 
   it('create_attachment base64-decodes content and calls upload', async () => {

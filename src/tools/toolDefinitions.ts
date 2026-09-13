@@ -77,6 +77,17 @@ function def<T extends AnySchema>(
  */
 const MAX_INLINE_DOWNLOAD_BYTES = 5 * 1024 * 1024;
 
+/**
+ * Default `pageSize` sent to GET /timelogs (and its folder/task-scoped
+ * variants) when the caller supplies neither `pageSize` nor `limit`. Wrike's
+ * docs say plainly that omitting both returns every matching timelog in one
+ * response — a live sweep observed ~257,000 lines from a single unfiltered
+ * call on this account. Chosen as a defensible middle ground: bounded well
+ * below Wrike's documented pageSize ceiling (1000), but generous enough that
+ * routine use rarely needs a second page.
+ */
+const DEFAULT_TIMELOG_PAGE_SIZE = 200;
+
 /** Serializes array/object query values the Wrike API expects (JSON in query string). */
 function query(params: Record<string, unknown>): Record<string, string | number | boolean | undefined> {
     const out: Record<string, string | number | boolean | undefined> = {};
@@ -270,12 +281,31 @@ export function buildTools(): ToolDefinition[] {
             const { taskId, ...rest } = p;
             return c.post(`/tasks/${taskId}/timelogs`, query({ fields: rest.fields }), rest);
         }),
-        def('list_timelogs', 'List timelogs with filters (folder, contacts, categories, date range, pagination).', S.ListTimelogsSchema, (c, p) => {
-            const { folderId, ...rest } = p;
-            return folderId
-                ? c.get(`/folders/${folderId}/timelogs`, query(rest))
-                : c.get('/timelogs', query(rest));
-        }),
+        def(
+            'list_timelogs',
+            `List timelogs with documented filters (createdDate/updatedDate/trackedDate ranges, ` +
+                `timelogCategories, exportStatuses, billingTypes, approvalStatuses, me, descendants). ` +
+                `Results are paginated: defaults to pageSize ${DEFAULT_TIMELOG_PAGE_SIZE} when neither ` +
+                `pageSize nor limit is given (Wrike returns the entire account's timelog history in one ` +
+                `response otherwise), use nextPageToken to continue. folderId/taskId route to that folder's ` +
+                `or task's timelogs instead of filtering the account-wide endpoint.`,
+            S.ListTimelogsSchema,
+            (c, p) => {
+                const { folderId, taskId, limit, pageSize, ...rest } = p;
+                // Wrike's own docs are explicit: omitting both pageSize and limit
+                // returns every matching timelog in a single response — a live
+                // sweep saw ~257,000 lines from one unfiltered call. Bound it by
+                // default; an explicit caller value is passed through untouched.
+                const bounded =
+                    limit === undefined && pageSize === undefined
+                        ? { pageSize: DEFAULT_TIMELOG_PAGE_SIZE }
+                        : { limit, pageSize };
+                const params = query({ ...rest, ...bounded });
+                if (folderId) return c.get(`/folders/${folderId}/timelogs`, params);
+                if (taskId) return c.get(`/tasks/${taskId}/timelogs`, params);
+                return c.get('/timelogs', params);
+            }
+        ),
         def('update_timelog', 'Update a timelog record.', S.UpdateTimelogSchema, (c, p) => {
             const { timelogId, ...rest } = p;
             return c.put(`/timelogs/${timelogId}`, query({ fields: rest.fields }), rest);
