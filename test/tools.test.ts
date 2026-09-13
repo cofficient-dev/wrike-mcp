@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { buildTools } from '../src/tools/toolDefinitions.js';
-import { BinaryTooLargeError } from '../src/wrikeClient.js';
+import { BinaryTooLargeError, WrikeApiError } from '../src/wrikeClient.js';
 import type { WrikeClient } from '../src/wrikeClient.js';
 
 function mockClient() {
@@ -474,8 +474,10 @@ describe('attachment download', () => {
     ).rejects.toThrow('network blip');
   });
 
-  it("get_attachment with mode: 'url' returns a signed URL and makes no Wrike HTTP call", async () => {
+  it("get_attachment with mode: 'url' checks the attachment is Wrike-hosted, then returns a signed URL", async () => {
     const client = mockClient();
+    // mockClient's default `get` returns an empty data array, i.e. no `type`
+    // reported — treated the same as type: 'Wrike'.
     const result = (await byName('get_attachment').handler(client, {
       attachmentId: 'IEAGIITRIMFWG6YH',
       mode: 'url',
@@ -487,9 +489,125 @@ describe('attachment download', () => {
       url: 'https://mcp.example.com/wrike/attachments/IEAGIITRIMFWG6YH/file?token=abc',
       expiresAt: '2026-01-01T00:15:00.000Z',
     });
-    // Minting a URL is purely local signing — no metadata GET, no binary download.
-    expect(client.get as ReturnType<typeof vi.fn>).not.toHaveBeenCalled();
+    // Minting still involves one metadata GET (to rule out an externally
+    // hosted attachment) but no binary download.
+    expect(client.get as ReturnType<typeof vi.fn>).toHaveBeenCalledTimes(1);
     expect(client.getBinary as ReturnType<typeof vi.fn>).not.toHaveBeenCalled();
+  });
+
+  it("get_attachment with mode: 'url' still mints a link when metadata reports type: 'Wrike', without asking a parent listing", async () => {
+    const client = mockClient();
+    (client.get as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      kind: 'attachments',
+      data: [{ id: 'IEAGIITRIMFWG6YH', type: 'Wrike', taskId: 'IEAGIITR' }],
+    });
+    const result = (await byName('get_attachment').handler(client, {
+      attachmentId: 'IEAGIITRIMFWG6YH',
+      mode: 'url',
+    })) as Record<string, unknown>;
+    expect(result.url).toBe('https://mcp.example.com/wrike/attachments/IEAGIITRIMFWG6YH/file?token=abc');
+    // Only the one metadata GET — a Wrike-hosted file never needs the parent listing.
+    expect(client.get as ReturnType<typeof vi.fn>).toHaveBeenCalledTimes(1);
+  });
+
+  it("get_attachment with mode: 'url' resolves the provider's own URL for an externally hosted attachment on a task", async () => {
+    const client = mockClient();
+    (client.get as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce({
+        kind: 'attachments',
+        data: [{ id: 'IEAGIITRIMFWG6YH', type: 'OneDrive', taskId: 'IEAGIITR' }],
+      })
+      .mockResolvedValueOnce({
+        kind: 'attachments',
+        data: [{ id: 'IEAGIITRIMFWG6YH', url: 'https://cofficientcouk.sharepoint.com/file123' }],
+      });
+    const result = (await byName('get_attachment').handler(client, {
+      attachmentId: 'IEAGIITRIMFWG6YH',
+      mode: 'url',
+    })) as Record<string, unknown>;
+
+    expect(result).toEqual({
+      attachmentId: 'IEAGIITRIMFWG6YH',
+      url: 'https://cofficientcouk.sharepoint.com/file123',
+      type: 'OneDrive',
+      note: expect.any(String),
+    });
+    expect(result).not.toHaveProperty('expiresAt');
+    expect(client.signedDownloadUrl as ReturnType<typeof vi.fn>).not.toHaveBeenCalled();
+    const [path, params] = (client.get as ReturnType<typeof vi.fn>).mock.calls[1];
+    expect(path).toBe('/tasks/IEAGIITR/attachments');
+    expect(params).toMatchObject({ withUrls: true });
+  });
+
+  it("get_attachment with mode: 'url' resolves the provider's own URL for an externally hosted attachment on a folder", async () => {
+    const client = mockClient();
+    (client.get as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce({
+        kind: 'attachments',
+        data: [{ id: 'IEAGIITRIMFWG6YH', type: 'SharePoint', folderId: 'IEAGIIFOLDER' }],
+      })
+      .mockResolvedValueOnce({
+        kind: 'attachments',
+        data: [{ id: 'IEAGIITRIMFWG6YH', url: 'https://cofficientcouk.sharepoint.com/file456' }],
+      });
+    const result = (await byName('get_attachment').handler(client, {
+      attachmentId: 'IEAGIITRIMFWG6YH',
+      mode: 'url',
+    })) as Record<string, unknown>;
+
+    expect(result.url).toBe('https://cofficientcouk.sharepoint.com/file456');
+    expect(result.type).toBe('SharePoint');
+    const [path, params] = (client.get as ReturnType<typeof vi.fn>).mock.calls[1];
+    expect(path).toBe('/folders/IEAGIIFOLDER/attachments');
+    expect(params).toMatchObject({ withUrls: true });
+  });
+
+  it("get_attachment with mode: 'url' throws when an externally hosted attachment's metadata names no parent", async () => {
+    const client = mockClient();
+    (client.get as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      kind: 'attachments',
+      data: [{ id: 'IEAGIITRIMFWG6YH', type: 'OneDrive' }],
+    });
+    // Distinct from the "listing came back empty" case below: here we never
+    // queried a parent at all, so it is still reasonable to suggest the
+    // caller run list_attachments themselves if they know the parent.
+    await expect(
+      byName('get_attachment').handler(client, { attachmentId: 'IEAGIITRIMFWG6YH', mode: 'url' })
+    ).rejects.toThrow(
+      /OneDrive.*names no parent task or folder.*If you know the task or folder.*list_attachments.*withUrls/s
+    );
+    expect(client.signedDownloadUrl as ReturnType<typeof vi.fn>).not.toHaveBeenCalled();
+  });
+
+  it("get_attachment with mode: 'url' throws a different message when the parent listing has no matching URL", async () => {
+    const client = mockClient();
+    (client.get as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce({
+        kind: 'attachments',
+        data: [{ id: 'IEAGIITRIMFWG6YH', type: 'OneDrive', taskId: 'IEAGIITR' }],
+      })
+      .mockResolvedValueOnce({ kind: 'attachments', data: [] }); // no matching id in the listing
+    // We already made exactly the withUrls: true query and it came back
+    // empty, so this message must not send the caller round that same loop —
+    // no "try list_attachments" here, and it must name the parent queried.
+    let caught: Error | undefined;
+    try {
+      await byName('get_attachment').handler(client, { attachmentId: 'IEAGIITRIMFWG6YH', mode: 'url' });
+    } catch (e) {
+      caught = e as Error;
+    }
+    expect(caught?.message).toMatch(/OneDrive.*task IEAGIITR.*queried with withUrls: true.*returned no URL.*Wrike directly/s);
+    expect(caught?.message).not.toMatch(/try list_attachments/i);
+  });
+
+  it("get_attachment with mode: 'download' surfaces Wrike's 'URL method only' 400 by pointing at mode: 'url'", async () => {
+    const client = mockClient();
+    (client.getBinary as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new WrikeApiError(400, 'invalid_request', 'Wrike API error 400 (invalid_request): Attachment can be accessed via URL method only')
+    );
+    await expect(
+      byName('get_attachment').handler(client, { attachmentId: 'IEAGIITRIMFWG6YH', mode: 'download' })
+    ).rejects.toThrow(/mode: 'url'/);
   });
 
   it("get_attachment mode: 'url' surfaces a clear error when PUBLIC_BASE_URL is not configured", async () => {
