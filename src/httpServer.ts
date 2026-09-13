@@ -1,6 +1,6 @@
 import express, { type Express, type Request, type Response, type NextFunction } from 'express';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { Readable } from 'node:stream';
+import { Readable, pipeline } from 'node:stream';
 import { AuthManager } from './auth/authManager.js';
 import { OAuthStateManager, WRIKE_AUTHORIZE_URL, exchangeCodeForTokens, toStoredTokens } from './auth/oauth.js';
 import { McpOAuthServer, McpOauthError } from './auth/mcpOauth.js';
@@ -293,13 +293,19 @@ export function createHttpApp({
                 res.end();
                 return;
             }
-            // Once bytes start flowing the status line is already sent, so a
-            // mid-stream failure cannot become a 502 — destroy the socket
-            // instead, which surfaces to the client as a truncated transfer
-            // rather than a silently short file.
+            // pipeline, not pipe: it tears both sides down together. On a
+            // client abort, pipe() only unpipes and would leave the Wrike
+            // response unconsumed, stranding that upstream connection until
+            // it times out — which matters precisely because this route is
+            // uncapped and its transfers can be long. Destroying the Readable
+            // propagates through fromWeb as reader.cancel() on the web stream.
+            //
+            // Once bytes are flowing the status line is already sent, so a
+            // mid-stream failure cannot become a 502; the socket is destroyed
+            // instead, surfacing as a truncated transfer rather than a
+            // silently short file.
             const body = Readable.fromWeb(file.body as Parameters<typeof Readable.fromWeb>[0]);
-            body.on('error', () => res.destroy());
-            body.pipe(res);
+            pipeline(body, res, () => undefined);
         } catch (err) {
             res.status(502).json({ error: 'download_failed', errorDescription: redact(errorMessage(err)) });
         }
@@ -555,7 +561,17 @@ function contentDispositionHeader(filename?: string): string {
     // Strips CR/LF and anything non-ASCII from the quoted fallback (header
     // injection and encoding both ruled out at once); the filename* form
     // carries the exact name via percent-encoding for clients that read it.
-    const ascii = filename.replace(/[^\x20-\x7E]/g, '_').replace(/"/g, '\\"');
+    //
+    // Backslash must be escaped BEFORE the quote, and cannot be skipped: 0x5C
+    // is printable so it survives the ASCII strip, and a name ending in one
+    // would otherwise emit filename="report\" — the trailing \" escaping the
+    // closing quote, leaving the quoted-string unterminated so a lenient
+    // parser swallows the filename* parameter after it. Doing the quote first
+    // would then double-escape the backslashes that escaping introduces.
+    const ascii = filename
+        .replace(/[^\x20-\x7E]/g, '_')
+        .replace(/\\/g, '\\\\')
+        .replace(/"/g, '\\"');
     return `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(filename)}`;
 }
 

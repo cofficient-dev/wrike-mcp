@@ -278,6 +278,60 @@ describe('GET /attachments/:id/file (signed download)', () => {
     expect(Buffer.from(res.body as Uint8Array).toString()).toBe('PNGBYTES');
   });
 
+  it('escapes a backslash in the filename so the quoted-string stays terminated', async () => {
+    // 0x5C is printable, so it survives the ASCII strip. Unescaped, a name
+    // ending in one emits filename="report\" — the trailing \" escapes the
+    // closing quote and a lenient parser swallows the filename* after it.
+    const config = configWithPublicBaseUrl();
+    const links = new AttachmentLinks(config.tokenEncryptionKey, config.publicBaseUrl!);
+    const fetchImpl = binaryFetch('BYTES', {
+      'Content-Disposition': 'attachment; filename="report\\\\"',
+    });
+    const { app } = makeApp(config, { fetchImpl: fetchImpl as unknown as typeof fetch, links });
+
+    const token = new URL(links.issue(AuthManager.PAT_USER_ID, 'BACKSLASHNAME001')).searchParams.get('token')!;
+    const res = await request(app).get(`/attachments/BACKSLASHNAME001/file?token=${encodeURIComponent(token)}`);
+
+    const cd = res.headers['content-disposition'] as string;
+    expect(cd).toContain('filename="report\\\\"');
+    // The quoted-string must close before filename*, not swallow it.
+    expect(cd).toMatch(/filename="report\\\\";\s*filename\*=/);
+  });
+
+  it('cancels the upstream Wrike stream when the client aborts', async () => {
+    // pipe() alone would unpipe on client close and leave the Wrike response
+    // unconsumed, stranding that connection — costly on an uncapped route
+    // whose transfers are long by design.
+    const config = configWithPublicBaseUrl();
+    const links = new AttachmentLinks(config.tokenEncryptionKey, config.publicBaseUrl!);
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.enqueue(new Uint8Array(Buffer.from('z'.repeat(16 * 1024))));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const fetchImpl = vi.fn().mockResolvedValue(
+      new Response(body, { status: 200, headers: { 'Content-Type': 'application/octet-stream' } })
+    );
+    const { app } = makeApp(config, { fetchImpl: fetchImpl as unknown as typeof fetch, links });
+
+    const token = new URL(links.issue(AuthManager.PAT_USER_ID, 'ABORTEDDOWNLOAD1')).searchParams.get('token')!;
+    const req = request(app)
+      .get(`/attachments/ABORTEDDOWNLOAD1/file?token=${encodeURIComponent(token)}`)
+      .buffer(false);
+    // Abort once bytes are flowing, mimicking a browser that goes away.
+    req.on('response', () => setImmediate(() => req.abort()));
+    await new Promise<void>((resolve) => {
+      req.end(() => resolve());
+    });
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(cancelled).toBe(true);
+  });
+
   it('marks the response private and uncacheable', async () => {
     // Private file bytes authorised by a URL-borne credential: a shared or
     // intermediary cache must not be left to its own heuristics about them.
