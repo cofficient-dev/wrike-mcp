@@ -293,6 +293,17 @@ export function buildTools(): ToolDefinition[] {
             S.ListTimelogsSchema,
             (c, p) => {
                 const { folderId, taskId, limit, pageSize, ...rest } = p;
+                // Contradiction, not a combination: they select different
+                // endpoints. Silently preferring one would return
+                // folder-scoped results that read as task-scoped — wrong data
+                // presented as if it were right. Enforced here rather than in
+                // the schema because a top-level tool schema must stay a plain
+                // ZodObject for the MCP SDK to register it.
+                if (folderId !== undefined && taskId !== undefined) {
+                    throw new Error(
+                        'Pass folderId or taskId, not both — they select different endpoints'
+                    );
+                }
                 // Wrike's own docs are explicit: omit pageSize and every matching
                 // timelog comes back in a single response — a live sweep saw
                 // ~257,000 lines from one unfiltered call.

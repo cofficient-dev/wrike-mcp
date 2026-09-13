@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { WrikeIdSchema } from '../src/tools/schemas.js';
+import { buildTools } from '../src/tools/toolDefinitions.js';
 
 describe('WrikeIdSchema', () => {
   it('accepts a legacy 16-char uppercase+digit id', () => {
@@ -33,5 +34,35 @@ describe('WrikeIdSchema', () => {
 
   it('rejects an id containing a space', () => {
     expect(WrikeIdSchema.safeParse('ABC DEF').success).toBe(false);
+  });
+});
+
+describe('WrikeIdSchema length bound', () => {
+  it('accepts ids far longer than anything Wrike currently mints', () => {
+    // The cap is a sanity bound, not a format claim — the bug this schema
+    // fixes was a bound drawn tightly around the ids visible at the time.
+    expect(() => WrikeIdSchema.parse('A'.repeat(64))).not.toThrow();
+    expect(() => WrikeIdSchema.parse('A'.repeat(128))).not.toThrow();
+  });
+
+  it('rejects an absurdly long id being pushed through as a path segment', () => {
+    expect(() => WrikeIdSchema.parse('A'.repeat(129))).toThrow();
+    expect(() => WrikeIdSchema.parse('A'.repeat(10_000))).toThrow();
+  });
+});
+
+describe('tool input schemas stay plain ZodObjects', () => {
+  it('every tool schema exposes .shape', () => {
+    // The MCP SDK registers a tool by reading its input schema's .shape, so a
+    // top-level schema wrapped by .refine() (a ZodEffects) breaks registration
+    // for *every* tool with "expected a zod object schema". Caught exactly
+    // that while adding a folderId/taskId exclusivity refine to
+    // ListTimelogsSchema; the check moved to the handler instead.
+    for (const tool of buildTools()) {
+      expect(
+        (tool.inputSchema as { shape?: unknown }).shape,
+        `${tool.name} input schema must be a plain ZodObject`
+      ).toBeDefined();
+    }
   });
 });

@@ -18,8 +18,20 @@ import { z } from 'zod';
  * its id back as input. Kept alphanumeric-only rather than dropped entirely:
  * it still catches obvious junk and, since these ids are frequently
  * interpolated into a URL path, keeps separators and traversal sequences out.
+ *
+ * The 128-char ceiling is a sanity bound, not a claim about the format: it
+ * stops an arbitrarily long string being pushed through as a path segment,
+ * while leaving room far beyond anything Wrike has been seen to mint (longest
+ * observed is 16). Deliberately generous — the failure this schema exists to
+ * fix was a bound set too tightly around the ids that happened to be visible
+ * at the time, and a cap of, say, 64 would repeat that mistake in miniature
+ * if the format grows again.
  */
-export const WrikeIdSchema = z.string().min(1).regex(/^[A-Za-z0-9]+$/, 'Wrike API ID');
+export const WrikeIdSchema = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^[A-Za-z0-9]+$/, 'Wrike API ID');
 
 export const TaskStatusSchema = z.enum(['Active', 'Deferred', 'Completed', 'Cancelled']);
 export const TaskImportanceSchema = z.enum(['High', 'Low', 'Normal']);
@@ -382,6 +394,13 @@ export const ListTimelogsSchema = z
     fields: z.array(z.string()).optional(),
   })
   .strict();
+// folderId and taskId select different endpoints, so passing both is a
+// contradiction rather than a combination — the handler rejects it (see
+// list_timelogs). That check cannot live here as a .refine(): the MCP SDK
+// registers a tool's input schema by reading its .shape, so a top-level
+// schema must stay a plain ZodObject. .refine() returns a ZodEffects wrapper
+// and every tool registration then fails with "expected a zod object schema".
+// (Nested schemas like TaskDatesSchema can use .refine() freely.)
 
 export const UpdateTimelogSchema = z
   .object({

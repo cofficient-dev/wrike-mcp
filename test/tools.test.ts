@@ -240,6 +240,14 @@ describe('tool validation and dispatch', () => {
       expect(params.pageSize).toBe(200);
     });
 
+    it('rejects folderId and taskId together rather than silently preferring one', async () => {
+      // They select different endpoints; preferring folderId would return
+      // folder-scoped results that read as task-scoped.
+      await expect(
+        byName('list_timelogs').handler(mockClient(), { folderId: 'IEAGIITR', taskId: 'TASK1234' })
+      ).rejects.toThrow(/not both/i);
+    });
+
     it('rejects a folderId or taskId shaped like a path traversal', async () => {
       // Both are interpolated into the request path by the handler.
       await expect(
