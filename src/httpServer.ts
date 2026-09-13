@@ -52,8 +52,14 @@ import { WrikeClient } from './wrikeClient.js';
  */
 const CONSENT_COOKIE_BASE = 'wrike_mcp_consent';
 
-/** Wrike attachment id shape, kept in step with GetAttachmentSchema. */
-const ATTACHMENT_ID = /^[A-Z0-9]{16}$/;
+/**
+ * Wrike attachment id shape, kept in step with `WrikeIdSchema` in
+ * `src/tools/schemas.ts` (not the old, narrower `GetAttachmentSchema`
+ * pattern this used to mirror — a live sweep found that pattern rejecting
+ * ids the account now mints, which would 404 downloads of anything recently
+ * uploaded through this server).
+ */
+const ATTACHMENT_ID = /^[A-Za-z0-9]+$/;
 
 export interface HttpServerDeps {
     config: AppConfig;

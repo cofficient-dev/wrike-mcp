@@ -4,6 +4,23 @@ import { z } from 'zod';
 // Common Wrike API v4 types (from https://developers.wrike.com reference)
 // ---------------------------------------------------------------------------
 
+/**
+ * A Wrike entity id (folder, task, space, attachment, timelog, contact, ...).
+ *
+ * Wrike documents no pattern for these — the OpenAPI definitions type them as
+ * plain strings — so a strict client-side shape was never justified by the
+ * API contract. This account mints both legacy uppercase ids
+ * (`IEACK5SYI7777777`, 16 chars; `KUABHKOF`, 8 chars) and newer mixed-case
+ * ones (`MQAAAAEPpWtv`, 12 chars). A live sweep found every prior
+ * `^[A-Z0-9]{8,16}$`-shaped regex in this file rejecting the new format on
+ * length and case, meaning anything this server created (e.g. via
+ * `create_folder`) was immediately unreachable by every other tool that took
+ * its id back as input. Kept alphanumeric-only rather than dropped entirely:
+ * it still catches obvious junk and, since these ids are frequently
+ * interpolated into a URL path, keeps separators and traversal sequences out.
+ */
+export const WrikeIdSchema = z.string().min(1).regex(/^[A-Za-z0-9]+$/, 'Wrike API ID');
+
 export const TaskStatusSchema = z.enum(['Active', 'Deferred', 'Completed', 'Cancelled']);
 export const TaskImportanceSchema = z.enum(['High', 'Low', 'Normal']);
 export const TaskDatesTypeSchema = z.enum(['Milestone', 'Backlog', 'Planned']);
@@ -69,7 +86,7 @@ export const CustomFieldSchema = z
 
 export const TaskCreateSchema = z
   .object({
-    folderId: z.string().regex(/^([A-Z0-9]){8,16}$/, 'Wrike folder API ID'),
+    folderId: WrikeIdSchema,
     title: z.string().min(1),
     description: z.string().optional(),
     status: TaskStatusSchema.optional(),
@@ -99,7 +116,7 @@ export const TaskCreateSchema = z
 
 export const TaskUpdateSchema = z
   .object({
-    taskId: z.string().regex(/^([A-Z0-9]){8,16}$/, 'Wrike task API ID'),
+    taskId: WrikeIdSchema,
     title: z.string().min(1).optional(),
     description: z.string().optional(),
     status: TaskStatusSchema.optional(),
@@ -164,7 +181,7 @@ export const ListTasksSchema = z
 
 export const GetTaskSchema = z
   .object({
-    taskId: z.string().regex(/^([A-Z0-9]){8,16}$/),
+    taskId: WrikeIdSchema,
     fields: z.array(z.string()).optional(),
   })
   .strict();
@@ -201,14 +218,14 @@ export const ListSpacesSchema = z
 
 export const GetSpaceSchema = z
   .object({
-    spaceId: z.string().regex(/^([A-Z0-9]){16}$/),
+    spaceId: WrikeIdSchema,
     fields: z.array(z.string()).optional(),
   })
   .strict();
 
 export const UpdateSpaceSchema = z
   .object({
-    spaceId: z.string().regex(/^([A-Z0-9]){16}$/),
+    spaceId: WrikeIdSchema,
     title: z.string().min(1).optional(),
     description: z.string().optional(),
     accessType: z.enum(['Private', 'Public']).optional(),
@@ -221,20 +238,20 @@ export const UpdateSpaceSchema = z
 
 export const ListFoldersSchema = z
   .object({
-    spaceId: z.string().regex(/^([A-Z0-9]){16}$/).optional(),
+    spaceId: WrikeIdSchema.optional(),
     fields: z.array(z.string()).optional(),
   })
   .strict();
 
 export const GetFolderTreeSchema = z
   .object({
-    folderId: z.string().regex(/^([A-Z0-9]){16}$/, 'Wrike folder API ID or Root API ID'),
+    folderId: WrikeIdSchema,
   })
   .strict();
 
 export const CreateFolderSchema = z
   .object({
-    folderId: z.string().regex(/^([A-Z0-9]){16}$/, 'Wrike folder API ID'),
+    folderId: WrikeIdSchema,
     title: z.string().min(1),
     description: z.string().optional(),
     shareds: z.array(z.string()).optional(),
@@ -246,7 +263,7 @@ export const CreateFolderSchema = z
 
 export const UpdateFolderSchema = z
   .object({
-    folderId: z.string().regex(/^([A-Z0-9]){16}$/),
+    folderId: WrikeIdSchema,
     title: z.string().min(1).optional(),
     description: z.string().optional(),
     addShareds: z.array(z.string()).optional(),
@@ -264,7 +281,7 @@ export const DeleteFolderSchema = z.object({ folderId: z.string() }).strict();
 export const AddCommentSchema = z
   .object({
     targetType: z.enum(['tasks', 'folders']),
-    targetId: z.string().regex(/^([A-Z0-9]){8,16}$/),
+    targetId: WrikeIdSchema,
     text: z.string().min(1),
     plainText: z.boolean().optional(),
     fields: z.array(z.string()).optional(),
@@ -274,7 +291,7 @@ export const AddCommentSchema = z
 export const ListCommentsSchema = z
   .object({
     targetType: z.enum(['tasks', 'folders']),
-    targetId: z.string().regex(/^([A-Z0-9]){8,16}$/),
+    targetId: WrikeIdSchema,
     fields: z.array(z.string()).optional(),
   })
   .strict();
@@ -283,7 +300,7 @@ export const ListCommentsSchema = z
 
 export const CreateTimelogSchema = z
   .object({
-    taskId: z.string().regex(/^([A-Z0-9]){8,16}$/),
+    taskId: WrikeIdSchema,
     comment: z.string().min(1),
     hours: z.number().positive(),
     trackedDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'yyyy-MM-dd'),
@@ -308,7 +325,7 @@ export const ListTimelogsSchema = z
 
 export const UpdateTimelogSchema = z
   .object({
-    timelogId: z.string().regex(/^([A-Z0-9]){8,16}$/),
+    timelogId: WrikeIdSchema,
     comment: z.string().optional(),
     hours: z.number().positive().optional(),
     trackedDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
@@ -326,7 +343,7 @@ export const DeleteTimelogSchema = z.object({ timelogId: z.string() }).strict();
 export const CreateAttachmentSchema = z
   .object({
     targetType: z.enum(['tasks', 'folders']),
-    targetId: z.string().regex(/^([A-Z0-9]){8,16}$/),
+    targetId: WrikeIdSchema,
     /** File name. */
     filename: z.string().min(1),
     /** Base64-encoded file content. */
@@ -342,7 +359,7 @@ export const CreateAttachmentSchema = z
 export const ListAttachmentsSchema = z
   .object({
     targetType: z.enum(['tasks', 'folders']),
-    targetId: z.string().regex(/^([A-Z0-9]){8,16}$/),
+    targetId: WrikeIdSchema,
     /** Wrike names this `withUrls` (plural); a `url` valid for 24h is added to each attachment. */
     withUrls: z.boolean().optional(),
     /** Include previous versions of each attachment. */
@@ -352,7 +369,7 @@ export const ListAttachmentsSchema = z
 
 export const GetAttachmentSchema = z
   .object({
-    attachmentId: z.string().regex(/^([A-Z0-9]){16}$/),
+    attachmentId: WrikeIdSchema,
     /**
      * What to return. Defaults to `'metadata'` when omitted.
      *

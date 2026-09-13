@@ -181,6 +181,43 @@ describe('tool validation and dispatch', () => {
       byName('get_task').handler(mockClient(), { taskId: 'TASK1234', bogus: 1 })
     ).rejects.toThrow();
   });
+
+  describe('new-format (mixed-case) ids', () => {
+    // Live sweep regression: create_folder returned id MQAAAAEPpWtv, and
+    // passing that exact id straight back into another tool was rejected
+    // client-side by the old ^[A-Z0-9]{8,16}$ id patterns before the request
+    // ever reached Wrike. Anything created through this server was
+    // immediately unreachable. WrikeIdSchema (schemas.ts) fixes this; these
+    // are the round trips the sweep found broken.
+    const NEW_FORMAT_ID = 'MQAAAAEPpWtv';
+
+    it('create_task accepts a new-format folderId', async () => {
+      const client = mockClient();
+      await expect(
+        byName('create_task').handler(client, { folderId: NEW_FORMAT_ID, title: 'x' })
+      ).resolves.toBeDefined();
+      const [path] = (client.post as ReturnType<typeof vi.fn>).mock.calls[0] as unknown as [string];
+      expect(path).toBe(`/folders/${NEW_FORMAT_ID}/tasks`);
+    });
+
+    it('get_task accepts a new-format taskId', async () => {
+      const client = mockClient();
+      await expect(
+        byName('get_task').handler(client, { taskId: NEW_FORMAT_ID })
+      ).resolves.toBeDefined();
+      const [path] = (client.get as ReturnType<typeof vi.fn>).mock.calls[0] as unknown as [string];
+      expect(path).toBe(`/tasks/${NEW_FORMAT_ID}`);
+    });
+
+    it('add_comment accepts a new-format targetId', async () => {
+      const client = mockClient();
+      await expect(
+        byName('add_comment').handler(client, { targetType: 'tasks', targetId: NEW_FORMAT_ID, text: 'hi' })
+      ).resolves.toBeDefined();
+      const [path] = (client.post as ReturnType<typeof vi.fn>).mock.calls[0] as unknown as [string];
+      expect(path).toBe(`/tasks/${NEW_FORMAT_ID}/comments`);
+    });
+  });
 });
 describe('attachment download', () => {
   it("get_attachment returns metadata only when mode is not set (defaults to 'metadata')", async () => {
