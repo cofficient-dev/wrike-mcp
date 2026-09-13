@@ -141,15 +141,24 @@ describe('WrikeClient (per-user)', () => {
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
-  it('retries on 429 and honors Retry-After', async () => {
+  it('retries on 429 and honors Retry-After, interpreted as seconds', async () => {
+    // Retry-After: '0' is falsy in JS and would take the "header absent"
+    // fallback path either way, so it can't tell seconds from milliseconds.
+    // A non-zero value is required to pin the unit: RFC 9110 defines
+    // Retry-After in SECONDS, so '1' must produce a ~1000ms wait. This test
+    // fails against a millisecond misinterpretation, which would resolve in
+    // ~1ms instead.
     const fetchImpl = vi
       .fn()
-      .mockResolvedValueOnce(jsonResponse(429, { error: 'rate_limit_exceeded' }, { 'Retry-After': '0' }))
+      .mockResolvedValueOnce(jsonResponse(429, { error: 'rate_limit_exceeded' }, { 'Retry-After': '1' }))
       .mockResolvedValueOnce(jsonResponse(200, { kind: 'tasks', data: [] }));
     const client = new WrikeClient(new AuthManager(patConfig, store), '__pat__', fetchImpl as unknown as typeof fetch);
+    const start = Date.now();
     const res = await client.get('/tasks');
+    const elapsedMs = Date.now() - start;
     expect(res.kind).toBe('tasks');
     expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(elapsedMs).toBeGreaterThanOrEqual(900);
   });
 
   it('fails after exhausting 429 retries', async () => {

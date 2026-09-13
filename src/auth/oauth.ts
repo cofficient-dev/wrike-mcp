@@ -1,5 +1,6 @@
 import { createHmac, timingSafeEqual, randomBytes } from 'node:crypto';
 import type { OAuthConfig } from '../config.js';
+import { parseRetryAfterMs } from '../retryAfter.js';
 
 export const WRIKE_AUTHORIZE_URL = 'https://login.wrike.com/oauth2/authorize/v4';
 export const WRIKE_TOKEN_URL = 'https://login.wrike.com/oauth2/token';
@@ -80,6 +81,50 @@ export class OAuthStateManager {
     }
 }
 
+/** Same attempt ceiling as WrikeClient.recover(): up to 3 attempts total. */
+const MAX_429_ATTEMPTS = 3;
+
+/**
+ * POSTs a Wrike OAuth token request, retrying on HTTP 429 the same way
+ * WrikeClient.recover() retries data calls (bounded attempts, honoring
+ * Retry-After). exchangeCodeForTokens and refreshTokens previously had no
+ * such recovery, so a token exchange or refresh during a rate-limit window
+ * failed outright instead of riding it out.
+ *
+ * On a final non-2xx response, reads the body so Wrike's own `error` and
+ * `errorDescription` reach the caller instead of a bare status code. On a
+ * retried (non-final) 429, the body is cancelled unread instead, matching
+ * the same leak fix already applied in wrikeClient.ts.
+ */
+async function postTokenRequest(
+    fetchImpl: typeof fetch,
+    body: URLSearchParams,
+    failureLabel: string
+): Promise<OAuthTokenResponse> {
+    for (let attempt = 0; ; attempt++) {
+        const res = await fetchImpl(WRIKE_TOKEN_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body,
+        });
+        if (res.status === 429 && attempt < MAX_429_ATTEMPTS - 1) {
+            const retryAfterMs = parseRetryAfterMs(res.headers.get('Retry-After'), attempt);
+            await res.body?.cancel().catch(() => undefined);
+            await new Promise((r) => setTimeout(r, retryAfterMs));
+            continue;
+        }
+        if (!res.ok) {
+            const err = (await res.json().catch(() => ({}))) as { error?: string; errorDescription?: string };
+            throw new Error(
+                `${failureLabel} failed with HTTP ${res.status}` +
+                    (err.error ? ` (${err.error})` : '') +
+                    (err.errorDescription ? `: ${err.errorDescription}` : '')
+            );
+        }
+        return (await res.json()) as OAuthTokenResponse;
+    }
+}
+
 /**
  * Exchanges an authorization code for tokens.
  * Token exchange happens server-side only; the client secret never leaves the process.
@@ -96,15 +141,7 @@ export async function exchangeCodeForTokens(
         code,
         redirect_uri: config.redirectUri,
     });
-    const res = await fetchImpl(WRIKE_TOKEN_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body,
-    });
-    if (!res.ok) {
-        throw new Error(`Wrike token exchange failed with HTTP ${res.status}`);
-    }
-    const json = (await res.json()) as OAuthTokenResponse;
+    const json = await postTokenRequest(fetchImpl, body, 'Wrike token exchange');
     if (!json.access_token) {
         throw new Error('Wrike token exchange response missing access_token');
     }
@@ -123,15 +160,7 @@ export async function refreshTokens(
         refresh_token: refreshToken,
     });
     if (config.scopes.length > 0) body.set('scope', config.scopes.join(','));
-    const res = await fetchImpl(WRIKE_TOKEN_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body,
-    });
-    if (!res.ok) {
-        throw new Error(`Wrike token refresh failed with HTTP ${res.status}`);
-    }
-    const json = (await res.json()) as OAuthTokenResponse;
+    const json = await postTokenRequest(fetchImpl, body, 'Wrike token refresh');
     if (!json.access_token) {
         throw new Error('Wrike token refresh response missing access_token');
     }

@@ -1,6 +1,7 @@
 import type { AuthManager, UserId } from './auth/authManager.js';
 import { AuthError } from './auth/authManager.js';
 import type { AttachmentLinks } from './auth/attachmentLinks.js';
+import { parseRetryAfterMs } from './retryAfter.js';
 
 export interface WrikeResponse<T> {
   kind: string;
@@ -177,7 +178,7 @@ export class WrikeClient {
       return retry(1);
     }
     if (res.status === 429 && attempt < 2) {
-      const retryAfterMs = Number(res.headers.get('Retry-After') ?? 0) || (attempt + 1) * 1000;
+      const retryAfterMs = parseRetryAfterMs(res.headers.get('Retry-After'), attempt);
       await res.body?.cancel().catch(() => undefined);
       await new Promise((r) => setTimeout(r, retryAfterMs));
       return retry(attempt + 1);
