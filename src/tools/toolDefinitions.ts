@@ -186,7 +186,13 @@ export function buildTools(): ToolDefinition[] {
             S.SearchSchema,
             async (c, p) => {
                 const ALL_TARGETS: readonly SearchTarget[] = ['tasks', 'folders', 'contacts'];
-                const targets = p.targets ?? ALL_TARGETS;
+                // Deduplicated: each entry becomes its own GET, so a repeated
+                // target would fire identical concurrent requests at one
+                // endpoint and report a single outage once per duplicate in
+                // `errors`. `targets` is a set in meaning, so treat it as one.
+                // This also bounds the fan-out at three without a separate
+                // length cap, since there are only three valid values.
+                const targets = Array.from(new Set(p.targets ?? ALL_TARGETS));
 
                 // Each promise carries its own target through to settlement (as the
                 // fulfilled value, or folded into the rejection) so results can be

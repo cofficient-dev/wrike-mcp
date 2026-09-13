@@ -393,6 +393,30 @@ describe('search', () => {
     ]);
   });
 
+  it('deduplicates targets so a repeat does not fire duplicate requests', async () => {
+    const client = mockSearchClient();
+    await byName('search').handler(client, {
+      query: 'invoice',
+      targets: ['tasks', 'tasks', 'folders', 'tasks'],
+    });
+
+    const calls = (client.get as ReturnType<typeof vi.fn>).mock.calls as [string][];
+    expect(calls.filter(([path]) => path === '/tasks')).toHaveLength(1);
+    expect(calls.map(([path]) => path).sort()).toEqual(['/folders', '/tasks']);
+  });
+
+  it('reports a failing target once even when it was requested twice', async () => {
+    const client = mockSearchClient({
+      '/contacts': new Error('Wrike API error 403 (forbidden): access denied'),
+    });
+    const result = (await byName('search').handler(client, {
+      query: 'invoice',
+      targets: ['contacts', 'contacts', 'tasks'],
+    })) as { errors?: { target: string }[] };
+
+    expect(result.errors).toHaveLength(1);
+  });
+
   it('throws when every target fails, rather than returning an empty success', async () => {
     // A systemic failure (expired token, Wrike down) must not come back as
     // { query, errors } with no results — that is success-shaped and reads at
