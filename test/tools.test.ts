@@ -11,9 +11,9 @@ function mockClient() {
     delete: vi.fn().mockResolvedValue({ kind: 'ok', data: [] }),
     upload: vi.fn().mockResolvedValue({ kind: 'attachments', data: [{ id: 'ATT' }] }),
     getBinary: vi.fn().mockResolvedValue({
-      data: Buffer.from('PNGBYTES'),
-      contentType: 'image/png',
-      filename: 'shot.png',
+      data: Buffer.from('PDFBYTES'),
+      contentType: 'application/pdf',
+      filename: 'doc.pdf',
     }),
     signedDownloadUrl: vi.fn().mockReturnValue({
       url: 'https://mcp.example.com/wrike/attachments/IEAGIITRIMFWG6YH/file?token=abc',
@@ -444,7 +444,7 @@ describe('attachment download', () => {
     expect(client.getBinary as ReturnType<typeof vi.fn>).not.toHaveBeenCalled();
   });
 
-  it("get_attachment with mode: 'download' returns base64 file content plus a do-not-relay note", async () => {
+  it("get_attachment with mode: 'download' returns base64 file content plus a do-not-relay note for a non-image attachment", async () => {
     const client = mockClient();
     const result = (await byName('get_attachment').handler(client, {
       attachmentId: 'IEAGIITRIMFWG6YH',
@@ -454,14 +454,61 @@ describe('attachment download', () => {
     const [path] = (client.getBinary as ReturnType<typeof vi.fn>).mock.calls[0];
     expect(path).toBe('/attachments/IEAGIITRIMFWG6YH/download');
     expect(result.encoding).toBe('base64');
-    expect(Buffer.from(result.content as string, 'base64').toString()).toBe('PNGBYTES');
-    expect(result.contentType).toBe('image/png');
-    expect(result.filename).toBe('shot.png');
+    expect(Buffer.from(result.content as string, 'base64').toString()).toBe('PDFBYTES');
+    expect(result.contentType).toBe('application/pdf');
+    expect(result.filename).toBe('doc.pdf');
     expect(result.size).toBe(8);
     // The field the caller is already reading, telling it not to retype this
     // content verbatim to a person and to use mode: 'url' instead.
     expect(typeof result.note).toBe('string');
     expect(result.note as string).toMatch(/mode: 'url'/);
+    // Not the image-content marker: this is a plain object still destined for
+    // JSON.stringify, and must not carry the __mcpContent opt-out key.
+    expect(result).not.toHaveProperty('__mcpContent');
+  });
+
+  it("get_attachment with mode: 'download' returns an MCP image block for an image attachment, with metadata but no base64 in the text block", async () => {
+    const client = mockClient();
+    (client.getBinary as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      data: Buffer.from('PNGBYTES'),
+      contentType: 'image/png',
+      filename: 'shot.png',
+    });
+    const result = (await byName('get_attachment').handler(client, {
+      attachmentId: 'IEAGIITRIMFWG6YH',
+      mode: 'download',
+    })) as { __mcpContent: Array<Record<string, unknown>> };
+
+    expect(result.__mcpContent).toHaveLength(2);
+    const [image, text] = result.__mcpContent;
+    expect(image).toMatchObject({
+      type: 'image',
+      mimeType: 'image/png',
+      data: Buffer.from('PNGBYTES').toString('base64'),
+    });
+    expect(text.type).toBe('text');
+    const textValue = text.text as string;
+    expect(textValue).toContain('IEAGIITRIMFWG6YH');
+    expect(textValue).toContain('shot.png');
+    expect(textValue).toContain('8');
+    expect(textValue).toContain('image/png');
+    expect(textValue).not.toContain(Buffer.from('PNGBYTES').toString('base64'));
+  });
+
+  it("get_attachment with mode: 'download' strips content-type parameters (e.g. Wrike's 'image/png;charset=UTF-8') before deciding it's an image and before setting mimeType", async () => {
+    const client = mockClient();
+    (client.getBinary as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      data: Buffer.from('PNGBYTES'),
+      contentType: 'image/png;charset=UTF-8',
+      filename: 'shot.png',
+    });
+    const result = (await byName('get_attachment').handler(client, {
+      attachmentId: 'IEAGIITRIMFWG6YH',
+      mode: 'download',
+    })) as { __mcpContent: Array<Record<string, unknown>> };
+
+    const [image] = result.__mcpContent;
+    expect(image.mimeType).toBe('image/png');
   });
 
   it("get_attachment passes a byte budget to getBinary for mode: 'download' so oversized files are rejected before buffering", async () => {

@@ -1,5 +1,6 @@
 import type { WrikeClient } from '../wrikeClient.js';
 import { BinaryTooLargeError, WrikeApiError } from '../wrikeClient.js';
+import type { McpContentResult } from './toolRegistry.js';
 import * as S from './schemas.js';
 import { z } from 'zod';
 
@@ -395,7 +396,8 @@ export function buildTools(): ToolDefinition[] {
             "etc.) for an externally hosted one. Costs one or two Wrike calls. Use mode: 'download' " +
             "only when the calling program itself must operate on the bytes: hashing, parsing, " +
             "inspecting content. It returns the file base64-encoded, roughly a third bigger than the " +
-            "original, which is expensive in context and easy to corrupt. A sandboxed caller that must " +
+            "original, which is expensive in context and easy to corrupt. An image attachment is the " +
+            "exception: it comes back as a viewable image, not base64. A sandboxed caller that must " +
             "materialise the file itself should still try fetching the mode: 'url' link first: sandbox " +
             "egress is usually allowlisted, not blocked. Fall back to mode: 'download' only if that " +
             "fetch actually fails. mode: 'download' never works for an externally hosted attachment; " +
@@ -514,6 +516,29 @@ export function buildTools(): ToolDefinition[] {
                         );
                     }
                     throw err;
+                }
+                // Wrike sends content types with parameters attached (an observed
+                // real value: 'image/png;charset=UTF-8'). The MCP image block needs
+                // a clean media type, and the image/ check below must run against
+                // that same cleaned value or it would miss exactly this case.
+                const cleanContentType = (file.contentType.split(';')[0] ?? '').trim();
+                if (cleanContentType.startsWith('image/')) {
+                    // Base64 is not repeated in the text block: that would put the
+                    // context cost this exists to avoid right back in, next to the
+                    // image block that already carries the same bytes.
+                    const metaLines = [
+                        `attachmentId: ${p.attachmentId}`,
+                        ...(file.filename ? [`filename: ${file.filename}`] : []),
+                        `size: ${file.data.byteLength} bytes`,
+                        `contentType: ${cleanContentType}`,
+                    ];
+                    const imageResult: McpContentResult = {
+                        __mcpContent: [
+                            { type: 'image', data: file.data.toString('base64'), mimeType: cleanContentType },
+                            { type: 'text', text: metaLines.join('\n') },
+                        ],
+                    };
+                    return imageResult;
                 }
                 return {
                     attachmentId: p.attachmentId,

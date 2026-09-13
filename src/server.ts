@@ -1,8 +1,16 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
-import type { ToolRegistry } from './tools/toolRegistry.js';
+import type { ToolRegistry, McpContentResult } from './tools/toolRegistry.js';
 import type { WrikeClient } from './wrikeClient.js';
 import { WrikeApiError } from './wrikeClient.js';
+
+function isMcpContentResult(value: unknown): value is McpContentResult {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    Array.isArray((value as Record<string, unknown>).__mcpContent)
+  );
+}
 
 /**
  * Wrike MCP server. Each authenticated session gets its own McpServer
@@ -28,6 +36,9 @@ export function createMcpServer(
       async (args: Record<string, unknown>): Promise<CallToolResult> => {
         try {
           const result = await tool.handler(client, args);
+          if (isMcpContentResult(result)) {
+            return { content: result.__mcpContent, isError: false };
+          }
           return {
             content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
             isError: false,

@@ -1,7 +1,22 @@
 import { z } from 'zod';
+import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import type { ToolDefinition } from './toolDefinitions.js';
 import type { WrikeClient } from '../wrikeClient.js';
 import type { UserId } from '../auth/authManager.js';
+
+/**
+ * Opt-out marker a tool handler can return instead of a plain result object.
+ * When present, its content blocks are passed through to the client as-is
+ * (e.g. an MCP `image` block) instead of being JSON-stringified into text.
+ *
+ * The key is deliberately unusual: a handler's real result can legitimately
+ * have its own `content` field (get_attachment's download shape does, holding
+ * base64), so detection must not key on that name or it would misread real
+ * data as this marker.
+ */
+export interface McpContentResult {
+  __mcpContent: NonNullable<CallToolResult['content']>;
+}
 
 /** Tool surface exposed to MCP clients. */
 export interface Tool {
