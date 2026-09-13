@@ -523,10 +523,11 @@ export function buildTools(): ToolDefinition[] {
                     encoding: 'base64',
                     content: file.data.toString('base64'),
                     note:
-                        "This is base64 content for programmatic use, not to retype or write out yourself. " +
-                        "If a person needs the file, call get_attachment again with mode: 'url' and hand " +
-                        "them that link — reproducing base64 verbatim, in a chat reply or a script, is " +
-                        "unreliable at this length and a corrupted copy is a silent failure.",
+                        "This is base64 content for programmatic use. If a person needs the file, call " +
+                        "get_attachment again with mode: 'url' and hand them that link instead — " +
+                        "reproducing base64 to a person is unreliable at this length and a corrupted " +
+                        "copy fails silently. Decoding it yourself to a file is fine; verify the result " +
+                        "by checking the decoded byte count against size.",
                 };
             }
         ),

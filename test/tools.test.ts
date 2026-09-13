@@ -367,7 +367,14 @@ describe('tool validation and dispatch', () => {
     const { description } = byName('get_attachment');
     // The decision rule has to be read before the calling model reaches
     // mode: 'download', not discovered as a prohibition after the fact.
-    expect(description.indexOf("mode: 'url'")).toBeLessThan(description.indexOf("mode: 'download'"));
+    // Assert both needles are present before comparing positions — indexOf
+    // returns -1 for an absent needle, so a bare "-1 < indexOf(other)"
+    // comparison would keep passing even if 'url' were dropped entirely.
+    const urlPos = description.indexOf("mode: 'url'");
+    const downloadPos = description.indexOf("mode: 'download'");
+    expect(urlPos).toBeGreaterThanOrEqual(0);
+    expect(downloadPos).toBeGreaterThanOrEqual(0);
+    expect(urlPos).toBeLessThan(downloadPos);
     expect(description).toMatch(/download/i);
     expect(description).toMatch(/get me/i);
     expect(description).toMatch(/save/i);
