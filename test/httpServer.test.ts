@@ -370,6 +370,38 @@ describe('GET /attachments/:id/file (signed download)', () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
+  it('refuses an attachment id longer than the 128-char WrikeIdSchema ceiling', async () => {
+    // ATTACHMENT_ID is a hand-kept copy of WrikeIdSchema's bound (see the
+    // comment on ATTACHMENT_ID) rather than an import, so it can silently
+    // drift out of step — as it did until this fix. Prove the copy actually
+    // enforces the same ceiling rather than trusting the comment.
+    const config = configWithPublicBaseUrl();
+    const links = new AttachmentLinks(config.tokenEncryptionKey, config.publicBaseUrl!);
+    const fetchImpl = binaryFetch('BYTES');
+    const { app } = makeApp(config, { fetchImpl: fetchImpl as unknown as typeof fetch, links });
+
+    const tooLongId = 'A'.repeat(129);
+    const token = new URL(links.issue(AuthManager.PAT_USER_ID, tooLongId)).searchParams.get('token')!;
+    const res = await request(app).get(`/attachments/${tooLongId}/file?token=${encodeURIComponent(token)}`);
+
+    expect(res.status).toBe(404);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it('accepts an attachment id at the 128-char WrikeIdSchema ceiling', async () => {
+    const config = configWithPublicBaseUrl();
+    const links = new AttachmentLinks(config.tokenEncryptionKey, config.publicBaseUrl!);
+    const fetchImpl = binaryFetch('BYTES');
+    const { app } = makeApp(config, { fetchImpl: fetchImpl as unknown as typeof fetch, links });
+
+    const maxLengthId = 'A'.repeat(128);
+    const token = new URL(links.issue(AuthManager.PAT_USER_ID, maxLengthId)).searchParams.get('token')!;
+    const res = await request(app).get(`/attachments/${maxLengthId}/file?token=${encodeURIComponent(token)}`);
+
+    expect(res.status).toBe(200);
+    expect(fetchImpl).toHaveBeenCalled();
+  });
+
   it('accepts a new-format mixed-case attachment id (previously 404ed under the old uppercase-only shape check)', async () => {
     // Live sweep regression: this account mints 12-char mixed-case
     // attachment ids (e.g. MQAAAAEPpWtv) alongside legacy uppercase ones.

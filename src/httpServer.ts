@@ -58,8 +58,14 @@ const CONSENT_COOKIE_BASE = 'wrike_mcp_consent';
  * pattern this used to mirror — a live sweep found that pattern rejecting
  * ids the account now mints, which would 404 downloads of anything recently
  * uploaded through this server).
+ *
+ * The `{1,128}` ceiling is the same 128-char sanity bound `WrikeIdSchema`
+ * applies, copied here rather than imported because this route validates the
+ * id before any tool schema is involved. This is the *second* time a bound
+ * added to `WrikeIdSchema` failed to reach this copy — when `schemas.ts`
+ * changes this pattern again, check this file too.
  */
-const ATTACHMENT_ID = /^[A-Za-z0-9]+$/;
+const ATTACHMENT_ID = /^[A-Za-z0-9]{1,128}$/;
 
 export interface HttpServerDeps {
     config: AppConfig;
