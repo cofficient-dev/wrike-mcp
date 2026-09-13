@@ -323,7 +323,15 @@ describe('GET /attachments/:id/file (signed download)', () => {
       .get(`/attachments/ABORTEDDOWNLOAD1/file?token=${encodeURIComponent(token)}`)
       .buffer(false);
     // Abort once bytes are flowing, mimicking a browser that goes away.
-    req.on('response', () => setImmediate(() => req.abort()));
+    // Aborting mid-response makes the client socket raise ECONNRESET, which
+    // is the expected outcome here but reaches vitest as an unhandled error
+    // ("this might cause false positive tests") unless it is caught. Swallow
+    // it on the request itself rather than leaving it to surface globally.
+    req.on('error', () => undefined);
+    req.on('response', (res) => {
+      res.on('error', () => undefined);
+      setImmediate(() => req.abort());
+    });
     await new Promise<void>((resolve) => {
       req.end(() => resolve());
     });
