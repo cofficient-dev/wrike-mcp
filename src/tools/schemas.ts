@@ -171,10 +171,14 @@ export const GetTaskSchema = z
 
 export const DeleteTaskSchema = z.object({ taskId: z.string() }).strict();
 
+/** Wrike has no unified search endpoint; `search` fans out to one GET per target. */
+export const SearchTargetSchema = z.enum(['tasks', 'folders', 'contacts']);
+
 export const SearchSchema = z
   .object({
     query: z.string().min(1),
     limit: z.number().int().positive().max(100).optional(),
+    targets: z.array(SearchTargetSchema).min(1).optional(),
   })
   .strict();
 

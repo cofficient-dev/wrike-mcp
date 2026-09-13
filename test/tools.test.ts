@@ -317,3 +317,125 @@ describe('attachment download', () => {
     expect(params).not.toHaveProperty('fields');
   });
 });
+describe('search', () => {
+  // Wrike has no unified search endpoint; `search` fans out to GET /tasks,
+  // GET /folders, and GET /contacts. mockClient() above answers every `get`
+  // call identically, which would let a call to the wrong path (or the old,
+  // nonexistent /search) go unnoticed — so this needs a client whose `get`
+  // resolves (or rejects) per path.
+  function mockSearchClient(overrides: Record<string, unknown> = {}) {
+    const responses: Record<string, unknown> = {
+      '/tasks': { kind: 'tasks', data: [{ id: 'T1', title: 'Task one' }, { id: 'T2', title: 'Task two' }] },
+      '/folders': { kind: 'folders', data: [{ id: 'F1', title: 'Folder one' }] },
+      '/contacts': { kind: 'contacts', data: [{ id: 'C1', name: 'Contact one' }] },
+      ...overrides,
+    };
+    const get = vi.fn(async (path: string) => {
+      const res = responses[path];
+      if (res instanceof Error) throw res;
+      return res;
+    });
+    return { get } as unknown as WrikeClient;
+  }
+
+  it('fans out to /tasks, /folders, /contacts with the right filter param per target, and never calls /search', async () => {
+    const client = mockSearchClient();
+    await byName('search').handler(client, { query: 'invoice' });
+
+    const calls = (client.get as ReturnType<typeof vi.fn>).mock.calls as [string, Record<string, unknown>][];
+    const byPath = Object.fromEntries(calls.map(([path, params]) => [path, params]));
+
+    expect(Object.keys(byPath).sort()).toEqual(['/contacts', '/folders', '/tasks']);
+    // The original bug: /tasks and /folders filter on `title`, /contacts on `name`.
+    // Mixing these up is exactly what shipped broken.
+    expect(byPath['/tasks']).toMatchObject({ title: 'invoice' });
+    expect(byPath['/folders']).toMatchObject({ title: 'invoice' });
+    expect(byPath['/contacts']).toMatchObject({ name: 'invoice' });
+    expect(byPath['/contacts']).not.toHaveProperty('title');
+
+    // Regression guard: there is no /search endpoint in Wrike API v4.
+    expect(calls.some(([path]) => path === '/search')).toBe(false);
+  });
+
+  it('merges results into the grouped { query, tasks, folders, contacts } shape', async () => {
+    const client = mockSearchClient();
+    const result = (await byName('search').handler(client, { query: 'invoice' })) as {
+      query: string;
+      tasks?: unknown[];
+      folders?: unknown[];
+      contacts?: unknown[];
+      errors?: unknown[];
+    };
+
+    expect(result.query).toBe('invoice');
+    expect(result.tasks).toEqual([{ id: 'T1', title: 'Task one' }, { id: 'T2', title: 'Task two' }]);
+    expect(result.folders).toEqual([{ id: 'F1', title: 'Folder one' }]);
+    expect(result.contacts).toEqual([{ id: 'C1', name: 'Contact one' }]);
+    expect(result.errors).toBeUndefined();
+  });
+
+  it('returns the other two targets when one fails, naming the failure in errors', async () => {
+    const client = mockSearchClient({
+      '/contacts': new Error('Wrike API error 403 (forbidden): access denied'),
+    });
+    const result = (await byName('search').handler(client, { query: 'invoice' })) as {
+      tasks?: unknown[];
+      folders?: unknown[];
+      contacts?: unknown[];
+      errors?: { target: string; error: string }[];
+    };
+
+    expect(result.tasks).toBeDefined();
+    expect(result.folders).toBeDefined();
+    expect(result.contacts).toBeUndefined();
+    expect(result.errors).toEqual([
+      { target: 'contacts', error: 'Wrike API error 403 (forbidden): access denied' },
+    ]);
+  });
+
+  it('limit is honoured per target: passed natively where documented, then sliced client-side', async () => {
+    const client = mockSearchClient({
+      '/tasks': { kind: 'tasks', data: [{ id: 'T1' }, { id: 'T2' }, { id: 'T3' }] },
+      '/folders': { kind: 'folders', data: [{ id: 'F1' }, { id: 'F2' }, { id: 'F3' }] },
+      '/contacts': { kind: 'contacts', data: [{ id: 'C1' }, { id: 'C2' }, { id: 'C3' }] },
+    });
+    const result = (await byName('search').handler(client, { query: 'invoice', limit: 2 })) as {
+      tasks?: unknown[];
+      folders?: unknown[];
+      contacts?: unknown[];
+    };
+
+    expect(result.tasks).toHaveLength(2);
+    expect(result.folders).toHaveLength(2);
+    expect(result.contacts).toHaveLength(2);
+
+    const calls = (client.get as ReturnType<typeof vi.fn>).mock.calls as [string, Record<string, unknown>][];
+    const byPath = Object.fromEntries(calls.map(([path, params]) => [path, params]));
+    expect(byPath['/tasks']).toMatchObject({ limit: 2 });
+    expect(byPath['/folders']).toMatchObject({ pageSize: 2 });
+    // /contacts documents neither `limit` nor `pageSize` — must not be sent one.
+    expect(byPath['/contacts']).not.toHaveProperty('limit');
+    expect(byPath['/contacts']).not.toHaveProperty('pageSize');
+  });
+
+  it('targets narrows the fan-out to only the requested endpoints', async () => {
+    const client = mockSearchClient();
+    const result = (await byName('search').handler(client, {
+      query: 'invoice',
+      targets: ['tasks'],
+    })) as { tasks?: unknown[]; folders?: unknown[]; contacts?: unknown[] };
+
+    expect(client.get as ReturnType<typeof vi.fn>).toHaveBeenCalledTimes(1);
+    expect((client.get as ReturnType<typeof vi.fn>).mock.calls[0][0]).toBe('/tasks');
+    expect(result.tasks).toBeDefined();
+    expect(result.folders).toBeUndefined();
+    expect(result.contacts).toBeUndefined();
+  });
+
+  it('description states contains-matching, undocumented contact semantics, and per-target limit', () => {
+    const tool = byName('search');
+    expect(tool.description).toMatch(/contains-match/i);
+    expect(tool.description).toMatch(/does not document/i);
+    expect(tool.description).toMatch(/per target/i);
+  });
+});
