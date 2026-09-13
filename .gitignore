@@ -9,3 +9,4 @@ certs/
 coverage/
 # Dirac agent cache
 .dirac-cache/
+.aider*
