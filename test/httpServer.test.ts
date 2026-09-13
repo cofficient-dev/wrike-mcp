@@ -371,10 +371,11 @@ describe('GET /attachments/:id/file (signed download)', () => {
   });
 
   it('refuses an attachment id longer than the 128-char WrikeIdSchema ceiling', async () => {
-    // ATTACHMENT_ID is a hand-kept copy of WrikeIdSchema's bound (see the
-    // comment on ATTACHMENT_ID) rather than an import, so it can silently
-    // drift out of step — as it did until this fix. Prove the copy actually
-    // enforces the same ceiling rather than trusting the comment.
+    // This route used to validate the id against a hand-copied regex that
+    // silently drifted out of step with WrikeIdSchema twice. It now imports
+    // the schema directly, so the ceiling cannot drift again — but keep the
+    // boundary covered here, since the route is unauthenticated and the id
+    // reaches an upstream Wrike path.
     const config = configWithPublicBaseUrl();
     const links = new AttachmentLinks(config.tokenEncryptionKey, config.publicBaseUrl!);
     const fetchImpl = binaryFetch('BYTES');
