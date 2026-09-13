@@ -3,6 +3,46 @@ import { BinaryTooLargeError } from '../wrikeClient.js';
 import * as S from './schemas.js';
 import { z } from 'zod';
 
+type SearchTarget = z.infer<typeof S.SearchTargetSchema>;
+
+/**
+ * Wrike API v4 has no `/search` endpoint — calling one returns
+ * `400 method_not_found`. Each target below is a real, separately-documented
+ * endpoint with its own filter parameter name and its own (undocumented, for
+ * contacts) matching behaviour; do not collapse these back into one path.
+ */
+const SEARCH_TARGETS: Record<SearchTarget, { path: string; filterParam: 'title' | 'name' }> = {
+    tasks: { path: '/tasks', filterParam: 'title' },
+    folders: { path: '/folders', filterParam: 'title' },
+    contacts: { path: '/contacts', filterParam: 'name' },
+};
+
+/**
+ * Queries one search target and applies `limit` uniformly.
+ *
+ * `limit` is passed natively where the endpoint documents support for it
+ * (`limit` on /tasks, `pageSize` on /folders — /folders does not document
+ * `limit` itself) and is otherwise left off the request (/contacts documents
+ * neither). The client-side slice afterwards makes the three behave the same
+ * from the caller's point of view regardless of that inconsistency.
+ */
+async function searchTarget(
+    client: WrikeClient,
+    target: SearchTarget,
+    q: string,
+    limit: number | undefined
+): Promise<unknown[]> {
+    const { path, filterParam } = SEARCH_TARGETS[target];
+    const params: Record<string, unknown> = { [filterParam]: q };
+    if (limit !== undefined) {
+        if (target === 'tasks') params.limit = limit;
+        else if (target === 'folders') params.pageSize = limit;
+    }
+    const res = await client.get<unknown[]>(path, query(params));
+    const data = Array.isArray(res.data) ? res.data : [];
+    return limit !== undefined ? data.slice(0, limit) : data;
+}
+
 type AnySchema = z.ZodTypeAny;
 
 export interface ToolDefinition {
@@ -133,8 +173,78 @@ export function buildTools(): ToolDefinition[] {
         def('delete_task', 'Delete a task (moves to Recycle Bin).', S.DeleteTaskSchema, (c, p) =>
             c.delete(`/tasks/${p.taskId}`)
         ),
-        def('search', 'Search tasks, folders, and contacts by title query.', S.SearchSchema, (c, p) =>
-            c.get('/search', { query: p.query, limit: p.limit })
+        def(
+            'search',
+            "Search tasks, folders, and contacts by query. Wrike API v4 has no unified search " +
+            "endpoint, so this fans out to GET /tasks and GET /folders (title, contains-match) and " +
+            "GET /contacts (name filter — Wrike does not document its matching semantics; don't rely " +
+            "on exact behaviour there). `limit` applies per target, not to the combined total — " +
+            "requesting limit: 10 can return up to 10 tasks AND up to 10 folders AND up to 10 " +
+            "contacts. Narrow `targets` to skip endpoints you don't need. If one target's endpoint " +
+            "fails (e.g. contacts is restricted on this account), the others are still returned; the " +
+            "failure is named in `errors` instead of failing the whole call.",
+            S.SearchSchema,
+            async (c, p) => {
+                const ALL_TARGETS: readonly SearchTarget[] = ['tasks', 'folders', 'contacts'];
+                // Deduplicated: each entry becomes its own GET, so a repeated
+                // target would fire identical concurrent requests at one
+                // endpoint and report a single outage once per duplicate in
+                // `errors`. `targets` is a set in meaning, so treat it as one.
+                // This also bounds the fan-out at three without a separate
+                // length cap, since there are only three valid values.
+                const targets = Array.from(new Set(p.targets ?? ALL_TARGETS));
+
+                // Each promise carries its own target through to settlement (as the
+                // fulfilled value, or folded into the rejection) so results can be
+                // matched back up without indexing parallel arrays.
+                const settled = await Promise.allSettled(
+                    targets.map((target) =>
+                        searchTarget(c, target, p.query, p.limit).then(
+                            (data) => ({ target, data }),
+                            (err) => {
+                                throw { target, error: err instanceof Error ? err.message : String(err) };
+                            }
+                        )
+                    )
+                );
+
+                // This tool merges three independent resources into one result, so
+                // unlike the single-object tools elsewhere in this file it cannot
+                // hand back a raw WrikeResponse envelope — there is no single `kind`
+                // that fits tasks, folders and contacts at once. A purpose-built
+                // shape is the correct departure from that convention here.
+                const result: {
+                    query: string;
+                    tasks?: unknown[];
+                    folders?: unknown[];
+                    contacts?: unknown[];
+                    errors?: { target: SearchTarget; error: string }[];
+                } = { query: p.query };
+                const errors: { target: SearchTarget; error: string }[] = [];
+
+                for (const s of settled) {
+                    if (s.status === 'fulfilled') {
+                        result[s.value.target] = s.value.data;
+                    } else {
+                        errors.push(s.reason as { target: SearchTarget; error: string });
+                    }
+                }
+                // Partial failure degrades gracefully, but total failure must not:
+                // { query, errors } with no results is success-shaped and reads at
+                // the call site exactly like a search that legitimately found
+                // nothing. An expired token or a Wrike outage would then surface to
+                // the user as "no results", which is worse than an error. Throw only
+                // when every requested target failed, so genuine partial outages keep
+                // returning what they did find.
+                if (errors.length === settled.length) {
+                    throw new Error(
+                        `Search failed for every target (${errors.map((e) => `${e.target}: ${e.error}`).join('; ')})`
+                    );
+                }
+                if (errors.length > 0) result.errors = errors;
+
+                return result;
+            }
         ),
 
         // -------------------------------------------------------------- comments
