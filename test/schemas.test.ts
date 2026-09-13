@@ -1,11 +1,14 @@
 import { describe, it, expect } from 'vitest';
-import { WrikeIdSchema } from '../src/tools/schemas.js';
+import { WrikeIdSchema, InstantRangeSchema, LocalDateTimeRangeSchema } from '../src/tools/schemas.js';
 import { buildTools } from '../src/tools/toolDefinitions.js';
 import { vi } from 'vitest';
 import type { WrikeClient } from '../src/wrikeClient.js';
 
 const mockDeleteClient = () =>
   ({ delete: vi.fn().mockResolvedValue({ kind: 'ok', data: [] }) }) as unknown as WrikeClient;
+
+const mockGetClient = () =>
+  ({ get: vi.fn().mockResolvedValue({ kind: 'ok', data: [] }) }) as unknown as WrikeClient;
 
 describe('WrikeIdSchema', () => {
   it('accepts a legacy 16-char uppercase+digit id', () => {
@@ -94,4 +97,69 @@ describe('delete schemas guard path-interpolated ids', () => {
       await expect(t.handler(mockDeleteClient(), { [field]: 'MQAAAAEPpWtv' })).resolves.toBeDefined();
     });
   }
+});
+
+describe('InstantRangeSchema', () => {
+  it('accepts the documented yyyy-MM-dd\'T\'HH:mm:ss\'Z\' format', () => {
+    expect(InstantRangeSchema.safeParse({ start: '2024-01-01T00:00:00Z' }).success).toBe(true);
+    expect(
+      InstantRangeSchema.safeParse({ start: '2024-01-01T00:00:00Z', end: '2024-01-31T23:59:59Z' }).success
+    ).toBe(true);
+  });
+
+  it('rejects a value missing the trailing Z', () => {
+    expect(InstantRangeSchema.safeParse({ start: '2024-01-01T00:00:00' }).success).toBe(false);
+  });
+
+  it('rejects a free-form string', () => {
+    expect(InstantRangeSchema.safeParse({ start: 'not a date' }).success).toBe(false);
+  });
+
+  it('rejects an empty object — a range naming no bound is meaningless', () => {
+    expect(InstantRangeSchema.safeParse({}).success).toBe(false);
+  });
+});
+
+describe('LocalDateTimeRangeSchema', () => {
+  it('accepts a date-only value', () => {
+    expect(LocalDateTimeRangeSchema.safeParse({ equal: '2024-01-01' }).success).toBe(true);
+  });
+
+  it('accepts a full date-time value (time part optional, no trailing Z)', () => {
+    expect(LocalDateTimeRangeSchema.safeParse({ start: '2024-01-01T09:00:00' }).success).toBe(true);
+  });
+
+  it('rejects a free-form string', () => {
+    expect(LocalDateTimeRangeSchema.safeParse({ equal: 'not a date' }).success).toBe(false);
+  });
+
+  it('rejects an empty object — a range naming no bound is meaningless', () => {
+    expect(LocalDateTimeRangeSchema.safeParse({}).success).toBe(false);
+  });
+});
+
+describe('list_timelogs date range filters end-to-end', () => {
+  it('accepts a valid createdDate/trackedDate range and passes it through as a query param', async () => {
+    const t = buildTools().find((x) => x.name === 'list_timelogs')!;
+    const client = mockGetClient();
+    await expect(
+      t.handler(client, {
+        createdDate: { start: '2024-01-01T00:00:00Z', end: '2024-01-31T23:59:59Z' },
+        trackedDate: { equal: '2024-01-15' },
+      })
+    ).resolves.toBeDefined();
+    // The handler's query() helper JSON-stringifies object-valued params.
+    expect(client.get).toHaveBeenCalledWith(
+      '/timelogs',
+      expect.objectContaining({
+        createdDate: JSON.stringify({ start: '2024-01-01T00:00:00Z', end: '2024-01-31T23:59:59Z' }),
+        trackedDate: JSON.stringify({ equal: '2024-01-15' }),
+      })
+    );
+  });
+
+  it('rejects an empty createdDate range before it ever reaches Wrike', async () => {
+    const t = buildTools().find((x) => x.name === 'list_timelogs')!;
+    await expect(t.handler(mockGetClient(), { createdDate: {} })).rejects.toThrow();
+  });
 });

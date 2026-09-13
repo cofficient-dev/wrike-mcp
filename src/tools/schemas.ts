@@ -323,21 +323,52 @@ export const CreateTimelogSchema = z
   })
   .strict();
 
+/** Wrike `InstantRange` format: `yyyy-MM-dd'T'HH:mm:ss'Z'` — the trailing `Z` is required. */
+const INSTANT_REGEX = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
+
 /**
  * `createdDate` / `updatedDate` filter shape (Wrike `InstantRange`: full
  * timestamp, no exact-match shorthand — set `start` and `end` to the same
  * value for that). See https://developers.wrike.com/api/v4/timelogs/.
+ *
+ * Both fields are optional individually (a range can be open-ended), but at
+ * least one must be present: a range naming no bound is meaningless input
+ * that would otherwise reach Wrike as a silent no-op filter. `.refine()` is
+ * safe on this schema because it is nested (used only inside
+ * `ListTimelogsSchema`'s fields), not a top-level tool input schema — see the
+ * note above `ListTimelogsSchema` for why that distinction matters.
  */
-export const InstantRangeSchema = z.object({ start: z.string().optional(), end: z.string().optional() }).strict();
+export const InstantRangeSchema = z
+  .object({
+    start: z.string().regex(INSTANT_REGEX, "yyyy-MM-dd'T'HH:mm:ss'Z'").optional(),
+    end: z.string().regex(INSTANT_REGEX, "yyyy-MM-dd'T'HH:mm:ss'Z'").optional(),
+  })
+  .strict()
+  .refine((r) => r.start !== undefined || r.end !== undefined, 'at least one of start or end is required');
+
+/** Wrike `LocalDateTimeRange` format: `yyyy-MM-dd'T'HH:mm:ss`, time part optional. */
+const LOCAL_DATE_TIME_REGEX = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}:\d{2})?$/;
 
 /**
  * `trackedDate` filter shape (Wrike `LocalDateTimeRange`: calendar
  * date/time; `equal` is the exact-match shorthand, distinct from
  * `InstantRangeSchema` above). See https://developers.wrike.com/api/v4/timelogs/.
+ *
+ * At least one field must be present, for the same reason as
+ * `InstantRangeSchema` above; `.refine()` is likewise safe here because this
+ * schema is nested, not a top-level tool input schema.
  */
 export const LocalDateTimeRangeSchema = z
-  .object({ equal: z.string().optional(), start: z.string().optional(), end: z.string().optional() })
-  .strict();
+  .object({
+    equal: z.string().regex(LOCAL_DATE_TIME_REGEX, "yyyy-MM-dd or yyyy-MM-dd'T'HH:mm:ss").optional(),
+    start: z.string().regex(LOCAL_DATE_TIME_REGEX, "yyyy-MM-dd or yyyy-MM-dd'T'HH:mm:ss").optional(),
+    end: z.string().regex(LOCAL_DATE_TIME_REGEX, "yyyy-MM-dd or yyyy-MM-dd'T'HH:mm:ss").optional(),
+  })
+  .strict()
+  .refine(
+    (r) => r.equal !== undefined || r.start !== undefined || r.end !== undefined,
+    'at least one of equal, start, or end is required'
+  );
 
 export const TimelogExportStatusSchema = z.enum(['NotExported', 'Exported', 'ReadyForExport']);
 export const TimelogBillingTypeSchema = z.enum(['Billable', 'NonBillable']);
