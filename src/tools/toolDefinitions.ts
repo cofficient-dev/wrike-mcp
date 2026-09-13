@@ -388,13 +388,18 @@ export function buildTools(): ToolDefinition[] {
         ),
         def(
             'get_attachment',
-            "Get an attachment by ID. mode: 'metadata' (default) returns metadata only. " +
-            "mode: 'url' returns a link for a person to open in a browser: this server's short-lived " +
-            "signed link for a Wrike-hosted file (needs PUBLIC_BASE_URL), or the provider's own URL " +
-            "(SharePoint, OneDrive, Google, Box, DropBox, etc.) for an externally hosted one — costs one " +
-            "or two Wrike calls to resolve which. mode: 'download' returns the file content base64-encoded " +
-            "for a program to consume directly — never use it to relay a file to a person in a chat reply, " +
-            "and it does not work for an externally hosted attachment; use mode: 'url' for those instead.",
+            "Get an attachment by ID. If a person wants the file, use mode: 'url' and hand them the " +
+            "link, even if they say 'download', 'get me', or 'save' it. A link is what a person opens. " +
+            "mode: 'url' returns this server's short-lived signed link for a Wrike-hosted file (needs " +
+            "PUBLIC_BASE_URL), or the provider's own URL (SharePoint, OneDrive, Google, Box, DropBox, " +
+            "etc.) for an externally hosted one. Costs one or two Wrike calls. Use mode: 'download' " +
+            "only when the calling program itself must operate on the bytes: hashing, parsing, " +
+            "inspecting content. It returns the file base64-encoded, roughly a third bigger than the " +
+            "original, which is expensive in context and easy to corrupt. A sandboxed caller that must " +
+            "materialise the file itself should still try fetching the mode: 'url' link first: sandbox " +
+            "egress is usually allowlisted, not blocked. Fall back to mode: 'download' only if that " +
+            "fetch actually fails. mode: 'download' never works for an externally hosted attachment; " +
+            "use mode: 'url' for those. mode: 'metadata' (default) returns metadata only.",
             S.GetAttachmentSchema,
             async (c, p) => {
                 const mode = p.mode ?? 'metadata';
@@ -518,10 +523,10 @@ export function buildTools(): ToolDefinition[] {
                     encoding: 'base64',
                     content: file.data.toString('base64'),
                     note:
-                        "This is base64 file content for a program to consume, not for you to retype. " +
-                        "Do not reproduce it verbatim in a chat reply — that is unreliable at this length " +
-                        "and a corrupted copy is a silent failure. To hand this file to a person, call " +
-                        "get_attachment again with mode: 'url'.",
+                        "This is base64 content for programmatic use, not to retype or write out yourself. " +
+                        "If a person needs the file, call get_attachment again with mode: 'url' and hand " +
+                        "them that link — reproducing base64 verbatim, in a chat reply or a script, is " +
+                        "unreliable at this length and a corrupted copy is a silent failure.",
                 };
             }
         ),

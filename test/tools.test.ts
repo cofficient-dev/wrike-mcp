@@ -363,6 +363,17 @@ describe('tool validation and dispatch', () => {
     }
   });
 
+  it("get_attachment description steers a person's download/get/save request to mode: 'url' first, and still flags the external-hosting restriction on mode: 'download'", () => {
+    const { description } = byName('get_attachment');
+    // The decision rule has to be read before the calling model reaches
+    // mode: 'download', not discovered as a prohibition after the fact.
+    expect(description.indexOf("mode: 'url'")).toBeLessThan(description.indexOf("mode: 'download'"));
+    expect(description).toMatch(/download/i);
+    expect(description).toMatch(/get me/i);
+    expect(description).toMatch(/save/i);
+    expect(description).toMatch(/externally hosted attachment/i);
+  });
+
   it('rejects unknown fields strictly (no passthrough)', async () => {
     await expect(
       byName('get_task').handler(mockClient(), { taskId: 'TASK1234', bogus: 1 })
