@@ -393,6 +393,28 @@ describe('search', () => {
     ]);
   });
 
+  it('throws when every target fails, rather than returning an empty success', async () => {
+    // A systemic failure (expired token, Wrike down) must not come back as
+    // { query, errors } with no results — that is success-shaped and reads at
+    // the call site exactly like a search that legitimately found nothing.
+    const client = mockSearchClient({
+      '/tasks': new Error('Wrike API error 401 (not_authorized): token expired'),
+      '/folders': new Error('Wrike API error 401 (not_authorized): token expired'),
+      '/contacts': new Error('Wrike API error 401 (not_authorized): token expired'),
+    });
+    await expect(byName('search').handler(client, { query: 'invoice' })).rejects.toThrow(/every target/i);
+  });
+
+  it('still throws when the single requested target fails', async () => {
+    // "every target failed" is relative to what was asked for, not to all three.
+    const client = mockSearchClient({
+      '/tasks': new Error('Wrike API error 500 (server_error): upstream'),
+    });
+    await expect(
+      byName('search').handler(client, { query: 'invoice', targets: ['tasks'] })
+    ).rejects.toThrow(/every target/i);
+  });
+
   it('limit is honoured per target: passed natively where documented, then sliced client-side', async () => {
     const client = mockSearchClient({
       '/tasks': { kind: 'tasks', data: [{ id: 'T1' }, { id: 'T2' }, { id: 'T3' }] },

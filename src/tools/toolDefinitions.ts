@@ -223,6 +223,18 @@ export function buildTools(): ToolDefinition[] {
                         errors.push(s.reason as { target: SearchTarget; error: string });
                     }
                 }
+                // Partial failure degrades gracefully, but total failure must not:
+                // { query, errors } with no results is success-shaped and reads at
+                // the call site exactly like a search that legitimately found
+                // nothing. An expired token or a Wrike outage would then surface to
+                // the user as "no results", which is worse than an error. Throw only
+                // when every requested target failed, so genuine partial outages keep
+                // returning what they did find.
+                if (errors.length === settled.length) {
+                    throw new Error(
+                        `Search failed for every target (${errors.map((e) => `${e.target}: ${e.error}`).join('; ')})`
+                    );
+                }
                 if (errors.length > 0) result.errors = errors;
 
                 return result;
