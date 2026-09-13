@@ -175,6 +175,52 @@ describe('WrikeClient (per-user)', () => {
     expect((init.headers as Record<string, string>).Authorization).toBe('bearer PAT-TOKEN');
     expect(init.body).toBeInstanceOf(FormData);
   });
+
+  it('upload sanitises a ";" in the filename (Wrike truncates the name there otherwise)', async () => {
+    // Observed live: uploading "semi;colon.txt" was stored by Wrike as "semi"
+    // — its multipart parser splits Content-Disposition on ';' without
+    // honouring the surrounding quoting, losing the extension (and with it
+    // the content type Wrike infers from it).
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(200, { kind: 'attachments', data: [{ id: 'A' }] }));
+    const client = new WrikeClient(new AuthManager(patConfig, store), '__pat__', fetchImpl as unknown as typeof fetch);
+    await client.upload('/tasks/TASK1234/attachments', {
+      name: 'semi;colon.txt',
+      contentType: 'text/plain',
+      data: Buffer.from('hello'),
+    });
+    const [, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    const sent = (init.body as FormData).get('file') as File;
+    expect(sent.name).toBe('semi_colon.txt');
+  });
+
+  it('upload sanitises a \'"\' in the filename (Wrike stores it back as literal %22 otherwise)', async () => {
+    // Observed live: uploading `quote"mark.txt` was stored as the literal
+    // "quote%22mark.txt" — undici percent-encodes '"' per the FormData spec,
+    // and Wrike stores that encoded text verbatim instead of decoding it.
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(200, { kind: 'attachments', data: [{ id: 'A' }] }));
+    const client = new WrikeClient(new AuthManager(patConfig, store), '__pat__', fetchImpl as unknown as typeof fetch);
+    await client.upload('/tasks/TASK1234/attachments', {
+      name: 'quote"mark.txt',
+      contentType: 'text/plain',
+      data: Buffer.from('hello'),
+    });
+    const [, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    const sent = (init.body as FormData).get('file') as File;
+    expect(sent.name).toBe('quote_mark.txt');
+  });
+
+  it('upload leaves non-ASCII and a bare "%" untouched (verified live to round-trip)', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(200, { kind: 'attachments', data: [{ id: 'A' }] }));
+    const client = new WrikeClient(new AuthManager(patConfig, store), '__pat__', fetchImpl as unknown as typeof fetch);
+    await client.upload('/tasks/TASK1234/attachments', {
+      name: 'café £5 50%.txt',
+      contentType: 'text/plain',
+      data: Buffer.from('hello'),
+    });
+    const [, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    const sent = (init.body as FormData).get('file') as File;
+    expect(sent.name).toBe('café £5 50%.txt');
+  });
 });
 describe('WrikeClient.getBinary', () => {
   it('returns raw bytes, content type and filename', async () => {

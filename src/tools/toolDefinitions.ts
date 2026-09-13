@@ -1,5 +1,5 @@
 import type { WrikeClient } from '../wrikeClient.js';
-import { BinaryTooLargeError } from '../wrikeClient.js';
+import { BinaryTooLargeError, WrikeApiError } from '../wrikeClient.js';
 import * as S from './schemas.js';
 import { z } from 'zod';
 
@@ -390,9 +390,11 @@ export function buildTools(): ToolDefinition[] {
             'get_attachment',
             "Get an attachment by ID. mode: 'metadata' (default) returns metadata only. " +
             "mode: 'url' returns a short-lived signed download link for a person to open in a browser " +
-            "(needs PUBLIC_BASE_URL; makes no Wrike API call). mode: 'download' returns the file content " +
-            "base64-encoded for a program to consume directly — never use it to relay a file to a person " +
-            "in a chat reply.",
+            "(needs PUBLIC_BASE_URL; makes one metadata call to check the attachment is Wrike-hosted " +
+            "before minting the link). mode: 'download' returns the file content base64-encoded for a " +
+            "program to consume directly — never use it to relay a file to a person in a chat reply. " +
+            "Neither mode works for an externally hosted attachment (OneDrive, SharePoint, Google, Box, " +
+            "DropBox) — use list_attachments with withUrls: true to get its natively hosted URL instead.",
             S.GetAttachmentSchema,
             async (c, p) => {
                 const mode = p.mode ?? 'metadata';
@@ -402,7 +404,22 @@ export function buildTools(): ToolDefinition[] {
                     return c.get(`/attachments/${p.attachmentId}`, query({ versions: p.versions }));
                 }
                 if (mode === 'url') {
-                    // Signed locally, so this never touches the Wrike API.
+                    // The signed link is minted locally, but whether it will actually
+                    // *work* depends on where Wrike hosts the file: an externally
+                    // hosted attachment (OneDrive, SharePoint, Google, Box, DropBox)
+                    // 400s on every Wrike-side access method except its own withUrls
+                    // link, so a signed link for one is a dead end for the person who
+                    // opens it. One metadata call tells us which case this is before
+                    // anything is minted.
+                    const meta = await c.get<Array<{ type?: string }>>(`/attachments/${p.attachmentId}`);
+                    const type = meta.data[0]?.type;
+                    if (type && type !== 'Wrike') {
+                        throw new Error(
+                            `Attachment is hosted externally (type: '${type}'), not in Wrike storage, so no ` +
+                            `Wrike-backed download link can be minted for it. Use list_attachments with ` +
+                            `withUrls: true to get its natively hosted URL instead.`
+                        );
+                    }
                     const { url, expiresAt } = c.signedDownloadUrl(p.attachmentId);
                     return { attachmentId: p.attachmentId, url, expiresAt };
                 }
@@ -419,6 +436,22 @@ export function buildTools(): ToolDefinition[] {
                         throw new Error(
                             `Attachment is over the ${MAX_INLINE_DOWNLOAD_BYTES}-byte inline limit. ` +
                             `Use mode: 'url' to get a short-lived download link instead.`
+                        );
+                    }
+                    // Wrike refuses this exact download for an externally hosted
+                    // attachment (OneDrive, SharePoint, Google, Box, DropBox) — its
+                    // download endpoint only serves files it stores itself. Anything
+                    // else from getBinary (network, auth, other 4xx/5xx) passes through
+                    // unchanged.
+                    if (
+                        err instanceof WrikeApiError &&
+                        err.status === 400 &&
+                        err.message.includes('can be accessed via URL method only')
+                    ) {
+                        throw new Error(
+                            `Attachment is hosted externally, not in Wrike storage, so Wrike will not serve ` +
+                            `it through this download endpoint. Use list_attachments with withUrls: true to ` +
+                            `get its natively hosted URL instead.`
                         );
                     }
                     throw err;

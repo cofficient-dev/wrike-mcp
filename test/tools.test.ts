@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { buildTools } from '../src/tools/toolDefinitions.js';
-import { BinaryTooLargeError } from '../src/wrikeClient.js';
+import { BinaryTooLargeError, WrikeApiError } from '../src/wrikeClient.js';
 import type { WrikeClient } from '../src/wrikeClient.js';
 
 function mockClient() {
@@ -474,8 +474,10 @@ describe('attachment download', () => {
     ).rejects.toThrow('network blip');
   });
 
-  it("get_attachment with mode: 'url' returns a signed URL and makes no Wrike HTTP call", async () => {
+  it("get_attachment with mode: 'url' checks the attachment is Wrike-hosted, then returns a signed URL", async () => {
     const client = mockClient();
+    // mockClient's default `get` returns an empty data array, i.e. no `type`
+    // reported — treated the same as type: 'Wrike'.
     const result = (await byName('get_attachment').handler(client, {
       attachmentId: 'IEAGIITRIMFWG6YH',
       mode: 'url',
@@ -487,9 +489,45 @@ describe('attachment download', () => {
       url: 'https://mcp.example.com/wrike/attachments/IEAGIITRIMFWG6YH/file?token=abc',
       expiresAt: '2026-01-01T00:15:00.000Z',
     });
-    // Minting a URL is purely local signing — no metadata GET, no binary download.
-    expect(client.get as ReturnType<typeof vi.fn>).not.toHaveBeenCalled();
+    // Minting still involves one metadata GET (to rule out an externally
+    // hosted attachment) but no binary download.
+    expect(client.get as ReturnType<typeof vi.fn>).toHaveBeenCalledTimes(1);
     expect(client.getBinary as ReturnType<typeof vi.fn>).not.toHaveBeenCalled();
+  });
+
+  it("get_attachment with mode: 'url' still mints a link when metadata reports type: 'Wrike'", async () => {
+    const client = mockClient();
+    (client.get as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      kind: 'attachments',
+      data: [{ id: 'IEAGIITRIMFWG6YH', type: 'Wrike' }],
+    });
+    const result = (await byName('get_attachment').handler(client, {
+      attachmentId: 'IEAGIITRIMFWG6YH',
+      mode: 'url',
+    })) as Record<string, unknown>;
+    expect(result.url).toBe('https://mcp.example.com/wrike/attachments/IEAGIITRIMFWG6YH/file?token=abc');
+  });
+
+  it("get_attachment with mode: 'url' throws for an externally hosted attachment instead of minting a dead link", async () => {
+    const client = mockClient();
+    (client.get as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      kind: 'attachments',
+      data: [{ id: 'IEAGIITRIMFWG6YH', type: 'OneDrive' }],
+    });
+    await expect(
+      byName('get_attachment').handler(client, { attachmentId: 'IEAGIITRIMFWG6YH', mode: 'url' })
+    ).rejects.toThrow(/OneDrive.*list_attachments.*withUrls/s);
+    expect(client.signedDownloadUrl as ReturnType<typeof vi.fn>).not.toHaveBeenCalled();
+  });
+
+  it("get_attachment with mode: 'download' surfaces Wrike's 'URL method only' 400 as actionable guidance", async () => {
+    const client = mockClient();
+    (client.getBinary as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new WrikeApiError(400, 'invalid_request', 'Wrike API error 400 (invalid_request): Attachment can be accessed via URL method only')
+    );
+    await expect(
+      byName('get_attachment').handler(client, { attachmentId: 'IEAGIITRIMFWG6YH', mode: 'download' })
+    ).rejects.toThrow(/list_attachments.*withUrls/s);
   });
 
   it("get_attachment mode: 'url' surfaces a clear error when PUBLIC_BASE_URL is not configured", async () => {

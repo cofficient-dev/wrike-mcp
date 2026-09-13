@@ -108,6 +108,31 @@ function dispositionFilename(disposition: string): string | undefined {
   return token?.[1] || undefined;
 }
 
+/**
+ * Strips the characters an uploaded filename does not survive intact through
+ * Wrike's own multipart parser, observed live against the real API:
+ *   - ';' truncates the name at the first occurrence — Wrike splits the
+ *     Content-Disposition header on ';' without honouring the surrounding
+ *     quoting, so "semi;colon.txt" was stored as "semi", losing the
+ *     extension and, with it, the content type Wrike infers from it.
+ *   - '"' comes back stored as the literal percent-encoded text undici's
+ *     FormData produces for it — "quote"mark.txt" was stored as
+ *     "quote%22mark.txt" rather than being decoded.
+ *   - bare CR/LF would inject extra header lines into the same multipart part.
+ * This is Wrike's parsing of a spec-correct multipart request, not a
+ * malformed request on our side. Wrike's published OpenAPI for
+ * POST /tasks/{taskId}/attachments documents only the path and query
+ * parameters — nothing about the request body format or any
+ * X-File-Name-style header — so a raw-body upload would mean coding against
+ * an undocumented contract rather than a documented one. Sanitising the
+ * filename we already send is the smaller fix. Everything else, including
+ * non-ASCII and a bare '%', round-trips fine (verified live with
+ * "café £5 50%.txt") and is left untouched.
+ */
+function sanitizeUploadFilename(name: string): string {
+  return name.replace(/[;"\r\n]/g, '_');
+}
+
 export interface QueryParams {
   [key: string]: string | number | boolean | undefined;
 }
@@ -228,7 +253,11 @@ export class WrikeClient {
       url.searchParams.set(k, v);
     }
     const form = new FormData();
-    form.append('file', new Blob([new Uint8Array(file.data)], { type: file.contentType }), file.name);
+    form.append(
+      'file',
+      new Blob([new Uint8Array(file.data)], { type: file.contentType }),
+      sanitizeUploadFilename(file.name)
+    );
     const res = await this.fetchImpl(url.toString(), {
       method: 'POST',
       headers: { Authorization: `bearer ${token}`, Accept: 'application/json' },
