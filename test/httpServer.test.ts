@@ -325,11 +325,14 @@ describe('GET /attachments/:id/file (signed download)', () => {
     // Abort once bytes are flowing, mimicking a browser that goes away.
     // Aborting mid-response makes the client socket raise ECONNRESET, which
     // is the expected outcome here but reaches vitest as an unhandled error
-    // ("this might cause false positive tests") unless it is caught. Swallow
-    // it on the request itself rather than leaving it to surface globally.
-    req.on('error', () => undefined);
+    // ("this might cause false positive tests") unless something listens for
+    // it. Collect rather than discard: swallowing every error would also hide
+    // a connection refused, a server that never responds, or an unexpected
+    // early end, any of which would let this test pass vacuously.
+    const clientErrors: NodeJS.ErrnoException[] = [];
+    req.on('error', (err: NodeJS.ErrnoException) => clientErrors.push(err));
     req.on('response', (res) => {
-      res.on('error', () => undefined);
+      res.on('error', (err: NodeJS.ErrnoException) => clientErrors.push(err));
       setImmediate(() => req.abort());
     });
     await new Promise<void>((resolve) => {
@@ -337,6 +340,10 @@ describe('GET /attachments/:id/file (signed download)', () => {
     });
     await new Promise((r) => setTimeout(r, 50));
 
+    // The deliberate abort is the only failure this test tolerates.
+    expect(clientErrors.map((e) => e.code)).toEqual(
+      clientErrors.map(() => 'ECONNRESET')
+    );
     expect(cancelled).toBe(true);
   });
 
