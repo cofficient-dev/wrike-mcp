@@ -77,6 +77,17 @@ function def<T extends AnySchema>(
  */
 const MAX_INLINE_DOWNLOAD_BYTES = 5 * 1024 * 1024;
 
+/**
+ * Default `pageSize` sent to GET /timelogs (and its folder/task-scoped
+ * variants) when the caller supplies neither `pageSize` nor `limit`. Wrike's
+ * docs say plainly that omitting both returns every matching timelog in one
+ * response — a live sweep observed ~257,000 lines from a single unfiltered
+ * call on this account. Chosen as a defensible middle ground: bounded well
+ * below Wrike's documented pageSize ceiling (1000), but generous enough that
+ * routine use rarely needs a second page.
+ */
+const DEFAULT_TIMELOG_PAGE_SIZE = 200;
+
 /** Serializes array/object query values the Wrike API expects (JSON in query string). */
 function query(params: Record<string, unknown>): Record<string, string | number | boolean | undefined> {
     const out: Record<string, string | number | boolean | undefined> = {};
@@ -119,8 +130,15 @@ export function buildTools(): ToolDefinition[] {
         def('list_folders', 'List folders, optionally scoped to a space.', S.ListFoldersSchema, (c, p) =>
             p.spaceId ? c.get(`/spaces/${p.spaceId}/folders`, query({ fields: p.fields })) : c.get('/folders')
         ),
+        // GET /folders/{folderId} does not accept `descendants` — a live
+        // sweep found every call here returning
+        // "400 (invalid_request): Parameter 'descendants' is not allowed",
+        // meaning this tool never worked. GET /folders/{folderId}/folders is
+        // the documented subfolder-tree endpoint and does accept it
+        // (boolean, default true, "Adds all descendant folders to search
+        // scope") — see https://developers.wrike.com/reference/getfolderssinglefolders.md
         def('get_folder_tree', 'Get the folder/project tree below a folder (use Root API ID for account tree).', S.GetFolderTreeSchema, (c, p) =>
-            c.get(`/folders/${p.folderId}`, { descendants: 'true' })
+            c.get(`/folders/${p.folderId}/folders`, { descendants: 'true' })
         ),
         def('create_folder', 'Create a folder/project under a parent folder.', S.CreateFolderSchema, (c, p) =>
             c.post(`/folders/${p.folderId}/folders`, query({ fields: p.fields }), {
@@ -263,12 +281,67 @@ export function buildTools(): ToolDefinition[] {
             const { taskId, ...rest } = p;
             return c.post(`/tasks/${taskId}/timelogs`, query({ fields: rest.fields }), rest);
         }),
-        def('list_timelogs', 'List timelogs with filters (folder, contacts, categories, date range, pagination).', S.ListTimelogsSchema, (c, p) => {
-            const { folderId, ...rest } = p;
-            return folderId
-                ? c.get(`/folders/${folderId}/timelogs`, query(rest))
-                : c.get('/timelogs', query(rest));
-        }),
+        def(
+            'list_timelogs',
+            `List timelogs with documented filters (createdDate/updatedDate/trackedDate ranges, ` +
+                `timelogCategories, exportStatuses, billingTypes, approvalStatuses, me, descendants). ` +
+                `Results are paginated: defaults to pageSize ${DEFAULT_TIMELOG_PAGE_SIZE} whenever pageSize ` +
+                `is not given (Wrike returns the entire account's timelog history in one response ` +
+                `otherwise), use nextPageToken to continue. limit caps the total across pages and does ` +
+                `not bound a single response. folderId/taskId route to that folder's or task's timelogs ` +
+                `instead of filtering the account-wide endpoint. Repeat folderId/taskId on every page ` +
+                `when paging with nextPageToken: the scoping id, not the token, selects the endpoint.`,
+            S.ListTimelogsSchema,
+            (c, p) => {
+                const { folderId, taskId, limit, pageSize, ...rest } = p;
+                // Contradiction, not a combination: they select different
+                // endpoints. Silently preferring one would return
+                // folder-scoped results that read as task-scoped — wrong data
+                // presented as if it were right. Enforced here rather than in
+                // the schema because a top-level tool schema must stay a plain
+                // ZodObject for the MCP SDK to register it.
+                if (folderId !== undefined && taskId !== undefined) {
+                    throw new Error(
+                        'Pass folderId or taskId, not both — they select different endpoints'
+                    );
+                }
+                // Wrike's own docs are explicit: omit pageSize and every matching
+                // timelog comes back in a single response — a live sweep saw
+                // ~257,000 lines from one unfiltered call.
+                //
+                // Only pageSize bounds the size of a response; `limit` caps the
+                // total across pages and does nothing to how much arrives at
+                // once. So the default is keyed on pageSize alone: keying it on
+                // "neither given" meant `limit: 100000` suppressed the default
+                // and reproduced the very problem this bounds. An explicit
+                // pageSize is passed through untouched.
+                // Not applied to a continuation: nextPageToken resumes a query
+                // that was already paged, and Wrike's docs say pageSize "can be
+                // omitted in this case" — the token carries that context.
+                // Injecting a default there would silently re-page a caller who
+                // started with a different size, so the default only bounds an
+                // initial request, which is the unbounded one it exists for.
+                const bounded =
+                    pageSize === undefined && rest.nextPageToken === undefined
+                        ? DEFAULT_TIMELOG_PAGE_SIZE
+                        : pageSize;
+                const params = query({ ...rest, limit, pageSize: bounded });
+                // Routing is keyed on folderId/taskId alone, not on
+                // nextPageToken — Wrike's docs don't say whether a
+                // continuation token itself carries endpoint scope (the
+                // /timelogs reference documents only the account-wide
+                // endpoint, not the folder/task variants), so that isn't
+                // assumed here. A caller who pages a scoped query must repeat
+                // folderId/taskId on every page or a token-only follow-up
+                // falls through to the account-wide endpoint below. That
+                // requirement is stated in the tool and schema descriptions
+                // rather than enforced here, since enforcing it would mean
+                // inventing a contract Wrike doesn't document.
+                if (folderId) return c.get(`/folders/${folderId}/timelogs`, params);
+                if (taskId) return c.get(`/tasks/${taskId}/timelogs`, params);
+                return c.get('/timelogs', params);
+            }
+        ),
         def('update_timelog', 'Update a timelog record.', S.UpdateTimelogSchema, (c, p) => {
             const { timelogId, ...rest } = p;
             return c.put(`/timelogs/${timelogId}`, query({ fields: rest.fields }), rest);

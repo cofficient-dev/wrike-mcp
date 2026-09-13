@@ -370,6 +370,58 @@ describe('GET /attachments/:id/file (signed download)', () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
+  it('refuses an attachment id longer than the 128-char WrikeIdSchema ceiling', async () => {
+    // This route used to validate the id against a hand-copied regex that
+    // silently drifted out of step with WrikeIdSchema twice. It now imports
+    // the schema directly, so the ceiling cannot drift again — but keep the
+    // boundary covered here, since the route is unauthenticated and the id
+    // reaches an upstream Wrike path.
+    const config = configWithPublicBaseUrl();
+    const links = new AttachmentLinks(config.tokenEncryptionKey, config.publicBaseUrl!);
+    const fetchImpl = binaryFetch('BYTES');
+    const { app } = makeApp(config, { fetchImpl: fetchImpl as unknown as typeof fetch, links });
+
+    const tooLongId = 'A'.repeat(129);
+    const token = new URL(links.issue(AuthManager.PAT_USER_ID, tooLongId)).searchParams.get('token')!;
+    const res = await request(app).get(`/attachments/${tooLongId}/file?token=${encodeURIComponent(token)}`);
+
+    expect(res.status).toBe(404);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it('accepts an attachment id at the 128-char WrikeIdSchema ceiling', async () => {
+    const config = configWithPublicBaseUrl();
+    const links = new AttachmentLinks(config.tokenEncryptionKey, config.publicBaseUrl!);
+    const fetchImpl = binaryFetch('BYTES');
+    const { app } = makeApp(config, { fetchImpl: fetchImpl as unknown as typeof fetch, links });
+
+    const maxLengthId = 'A'.repeat(128);
+    const token = new URL(links.issue(AuthManager.PAT_USER_ID, maxLengthId)).searchParams.get('token')!;
+    const res = await request(app).get(`/attachments/${maxLengthId}/file?token=${encodeURIComponent(token)}`);
+
+    expect(res.status).toBe(200);
+    expect(fetchImpl).toHaveBeenCalled();
+  });
+
+  it('accepts a new-format mixed-case attachment id (previously 404ed under the old uppercase-only shape check)', async () => {
+    // Live sweep regression: this account mints 12-char mixed-case
+    // attachment ids (e.g. MQAAAAEPpWtv) alongside legacy uppercase ones.
+    // The route's own ATTACHMENT_ID check used to be ^[A-Z0-9]{16}$, so any
+    // recently-uploaded attachment would 404 here even with a validly
+    // signed token.
+    const config = configWithPublicBaseUrl();
+    const links = new AttachmentLinks(config.tokenEncryptionKey, config.publicBaseUrl!);
+    const fetchImpl = binaryFetch('BYTES');
+    const { app } = makeApp(config, { fetchImpl: fetchImpl as unknown as typeof fetch, links });
+
+    const newFormatId = 'MQAAAAEPpWtv';
+    const token = new URL(links.issue(AuthManager.PAT_USER_ID, newFormatId)).searchParams.get('token')!;
+    const res = await request(app).get(`/attachments/${newFormatId}/file?token=${encodeURIComponent(token)}`);
+
+    expect(res.status).toBe(200);
+    expect(fetchImpl).toHaveBeenCalled();
+  });
+
   it('marks the response private and uncacheable', async () => {
     // Private file bytes authorised by a URL-borne credential: a shared or
     // intermediary cache must not be left to its own heuristics about them.

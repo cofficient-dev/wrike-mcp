@@ -8,6 +8,7 @@ import type { AttachmentLinks } from './auth/attachmentLinks.js';
 import { type AppConfig } from './config.js';
 import { redact, errorMessage, registerSecret } from './redact.js';
 import type { SessionManager } from './transport.js';
+import { WrikeIdSchema } from './tools/schemas.js';
 import { WrikeClient } from './wrikeClient.js';
 
 /**
@@ -52,8 +53,9 @@ import { WrikeClient } from './wrikeClient.js';
  */
 const CONSENT_COOKIE_BASE = 'wrike_mcp_consent';
 
-/** Wrike attachment id shape, kept in step with GetAttachmentSchema. */
-const ATTACHMENT_ID = /^[A-Z0-9]{16}$/;
+// The attachment id in this route is validated with the same `WrikeIdSchema`
+// the tools use (see `src/tools/schemas.ts`), so there is nothing here to
+// keep in sync.
 
 export interface HttpServerDeps {
     config: AppConfig;
@@ -273,7 +275,7 @@ export function createHttpApp({
         // Wrike API path on an intentionally unauthenticated route, so it is
         // worth refusing an odd one here rather than relying on every future
         // caller of issue() to have validated first.
-        if (!links || !token || !attachmentId || !ATTACHMENT_ID.test(attachmentId)) {
+        if (!links || !token || !attachmentId || !WrikeIdSchema.safeParse(attachmentId).success) {
             res.status(404).json({ error: 'not_found' });
             return;
         }

@@ -4,6 +4,35 @@ import { z } from 'zod';
 // Common Wrike API v4 types (from https://developers.wrike.com reference)
 // ---------------------------------------------------------------------------
 
+/**
+ * A Wrike entity id (folder, task, space, attachment, timelog, contact, ...).
+ *
+ * Wrike documents no pattern for these — the OpenAPI definitions type them as
+ * plain strings — so a strict client-side shape was never justified by the
+ * API contract. This account mints both legacy uppercase ids
+ * (`IEACK5SYI7777777`, 16 chars; `KUABHKOF`, 8 chars) and newer mixed-case
+ * ones (`MQAAAAEPpWtv`, 12 chars). A live sweep found every prior
+ * `^[A-Z0-9]{8,16}$`-shaped regex in this file rejecting the new format on
+ * length and case, meaning anything this server created (e.g. via
+ * `create_folder`) was immediately unreachable by every other tool that took
+ * its id back as input. Kept alphanumeric-only rather than dropped entirely:
+ * it still catches obvious junk and, since these ids are frequently
+ * interpolated into a URL path, keeps separators and traversal sequences out.
+ *
+ * The 128-char ceiling is a sanity bound, not a claim about the format: it
+ * stops an arbitrarily long string being pushed through as a path segment,
+ * while leaving room far beyond anything Wrike has been seen to mint (longest
+ * observed is 16). Deliberately generous — the failure this schema exists to
+ * fix was a bound set too tightly around the ids that happened to be visible
+ * at the time, and a cap of, say, 64 would repeat that mistake in miniature
+ * if the format grows again.
+ */
+export const WrikeIdSchema = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^[A-Za-z0-9]+$/, 'Wrike API ID');
+
 export const TaskStatusSchema = z.enum(['Active', 'Deferred', 'Completed', 'Cancelled']);
 export const TaskImportanceSchema = z.enum(['High', 'Low', 'Normal']);
 export const TaskDatesTypeSchema = z.enum(['Milestone', 'Backlog', 'Planned']);
@@ -69,7 +98,7 @@ export const CustomFieldSchema = z
 
 export const TaskCreateSchema = z
   .object({
-    folderId: z.string().regex(/^([A-Z0-9]){8,16}$/, 'Wrike folder API ID'),
+    folderId: WrikeIdSchema,
     title: z.string().min(1),
     description: z.string().optional(),
     status: TaskStatusSchema.optional(),
@@ -99,7 +128,7 @@ export const TaskCreateSchema = z
 
 export const TaskUpdateSchema = z
   .object({
-    taskId: z.string().regex(/^([A-Z0-9]){8,16}$/, 'Wrike task API ID'),
+    taskId: WrikeIdSchema,
     title: z.string().min(1).optional(),
     description: z.string().optional(),
     status: TaskStatusSchema.optional(),
@@ -164,12 +193,12 @@ export const ListTasksSchema = z
 
 export const GetTaskSchema = z
   .object({
-    taskId: z.string().regex(/^([A-Z0-9]){8,16}$/),
+    taskId: WrikeIdSchema,
     fields: z.array(z.string()).optional(),
   })
   .strict();
 
-export const DeleteTaskSchema = z.object({ taskId: z.string() }).strict();
+export const DeleteTaskSchema = z.object({ taskId: WrikeIdSchema }).strict();
 
 /** Wrike has no unified search endpoint; `search` fans out to one GET per target. */
 export const SearchTargetSchema = z.enum(['tasks', 'folders', 'contacts']);
@@ -201,14 +230,14 @@ export const ListSpacesSchema = z
 
 export const GetSpaceSchema = z
   .object({
-    spaceId: z.string().regex(/^([A-Z0-9]){16}$/),
+    spaceId: WrikeIdSchema,
     fields: z.array(z.string()).optional(),
   })
   .strict();
 
 export const UpdateSpaceSchema = z
   .object({
-    spaceId: z.string().regex(/^([A-Z0-9]){16}$/),
+    spaceId: WrikeIdSchema,
     title: z.string().min(1).optional(),
     description: z.string().optional(),
     accessType: z.enum(['Private', 'Public']).optional(),
@@ -221,20 +250,20 @@ export const UpdateSpaceSchema = z
 
 export const ListFoldersSchema = z
   .object({
-    spaceId: z.string().regex(/^([A-Z0-9]){16}$/).optional(),
+    spaceId: WrikeIdSchema.optional(),
     fields: z.array(z.string()).optional(),
   })
   .strict();
 
 export const GetFolderTreeSchema = z
   .object({
-    folderId: z.string().regex(/^([A-Z0-9]){16}$/, 'Wrike folder API ID or Root API ID'),
+    folderId: WrikeIdSchema,
   })
   .strict();
 
 export const CreateFolderSchema = z
   .object({
-    folderId: z.string().regex(/^([A-Z0-9]){16}$/, 'Wrike folder API ID'),
+    folderId: WrikeIdSchema,
     title: z.string().min(1),
     description: z.string().optional(),
     shareds: z.array(z.string()).optional(),
@@ -246,7 +275,7 @@ export const CreateFolderSchema = z
 
 export const UpdateFolderSchema = z
   .object({
-    folderId: z.string().regex(/^([A-Z0-9]){16}$/),
+    folderId: WrikeIdSchema,
     title: z.string().min(1).optional(),
     description: z.string().optional(),
     addShareds: z.array(z.string()).optional(),
@@ -257,14 +286,14 @@ export const UpdateFolderSchema = z
   })
   .strict();
 
-export const DeleteFolderSchema = z.object({ folderId: z.string() }).strict();
+export const DeleteFolderSchema = z.object({ folderId: WrikeIdSchema }).strict();
 
 // --- Comments ----------------------------------------------------------------
 
 export const AddCommentSchema = z
   .object({
     targetType: z.enum(['tasks', 'folders']),
-    targetId: z.string().regex(/^([A-Z0-9]){8,16}$/),
+    targetId: WrikeIdSchema,
     text: z.string().min(1),
     plainText: z.boolean().optional(),
     fields: z.array(z.string()).optional(),
@@ -274,7 +303,7 @@ export const AddCommentSchema = z
 export const ListCommentsSchema = z
   .object({
     targetType: z.enum(['tasks', 'folders']),
-    targetId: z.string().regex(/^([A-Z0-9]){8,16}$/),
+    targetId: WrikeIdSchema,
     fields: z.array(z.string()).optional(),
   })
   .strict();
@@ -283,7 +312,7 @@ export const ListCommentsSchema = z
 
 export const CreateTimelogSchema = z
   .object({
-    taskId: z.string().regex(/^([A-Z0-9]){8,16}$/),
+    taskId: WrikeIdSchema,
     comment: z.string().min(1),
     hours: z.number().positive(),
     trackedDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'yyyy-MM-dd'),
@@ -294,21 +323,126 @@ export const CreateTimelogSchema = z
   })
   .strict();
 
+/** Wrike `InstantRange` format: `yyyy-MM-dd'T'HH:mm:ss'Z'` — the trailing `Z` is required. */
+const INSTANT_REGEX = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
+
+/**
+ * `createdDate` / `updatedDate` filter shape (Wrike `InstantRange`: full
+ * timestamp, no exact-match shorthand — set `start` and `end` to the same
+ * value for that). See https://developers.wrike.com/api/v4/timelogs/.
+ *
+ * Both fields are optional individually (a range can be open-ended), but at
+ * least one must be present: a range naming no bound is meaningless input
+ * that would otherwise reach Wrike as a silent no-op filter. `.refine()` is
+ * safe on this schema because it is nested (used only inside
+ * `ListTimelogsSchema`'s fields), not a top-level tool input schema — see the
+ * note above `ListTimelogsSchema` for why that distinction matters.
+ */
+export const InstantRangeSchema = z
+  .object({
+    start: z.string().regex(INSTANT_REGEX, "yyyy-MM-dd'T'HH:mm:ss'Z'").optional(),
+    end: z.string().regex(INSTANT_REGEX, "yyyy-MM-dd'T'HH:mm:ss'Z'").optional(),
+  })
+  .strict()
+  .refine((r) => r.start !== undefined || r.end !== undefined, 'at least one of start or end is required');
+
+/** Wrike `LocalDateTimeRange` format: `yyyy-MM-dd'T'HH:mm:ss`, time part optional. */
+const LOCAL_DATE_TIME_REGEX = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}:\d{2})?$/;
+
+/**
+ * `trackedDate` filter shape (Wrike `LocalDateTimeRange`: calendar
+ * date/time; `equal` is the exact-match shorthand, distinct from
+ * `InstantRangeSchema` above). See https://developers.wrike.com/api/v4/timelogs/.
+ *
+ * At least one field must be present, for the same reason as
+ * `InstantRangeSchema` above; `.refine()` is likewise safe here because this
+ * schema is nested, not a top-level tool input schema.
+ */
+export const LocalDateTimeRangeSchema = z
+  .object({
+    equal: z.string().regex(LOCAL_DATE_TIME_REGEX, "yyyy-MM-dd or yyyy-MM-dd'T'HH:mm:ss").optional(),
+    start: z.string().regex(LOCAL_DATE_TIME_REGEX, "yyyy-MM-dd or yyyy-MM-dd'T'HH:mm:ss").optional(),
+    end: z.string().regex(LOCAL_DATE_TIME_REGEX, "yyyy-MM-dd or yyyy-MM-dd'T'HH:mm:ss").optional(),
+  })
+  .strict()
+  .refine(
+    (r) => r.equal !== undefined || r.start !== undefined || r.end !== undefined,
+    'at least one of equal, start, or end is required'
+  );
+
+export const TimelogExportStatusSchema = z.enum(['NotExported', 'Exported', 'ReadyForExport']);
+export const TimelogBillingTypeSchema = z.enum(['Billable', 'NonBillable']);
+export const TimelogApprovalStatusSchema = z.enum([
+  'Draft',
+  'NotRequired',
+  'Approved',
+  'Rejected',
+  'Cancelled',
+  'Pending',
+]);
+
+/**
+ * Filters for `GET /timelogs` (and the folder-/task-scoped variants this
+ * tool routes to). A live sweep found the previous shape — `contactIds`,
+ * `startDate`, `endDate` — all rejected live with
+ * "400 (invalid_request): Parameter '<name>' is not allowed", and an
+ * unfiltered call returning the account's entire timelog history (~257,000
+ * lines) in one response, because Wrike's docs are explicit that omitting
+ * `pageSize`/`limit` returns everything in a single response. This schema
+ * keeps only the parameters GET /timelogs documents; `folderId`/`taskId` are
+ * not among them but are accepted here because the tool handler uses them to
+ * route to `/folders/{folderId}/timelogs` / `/tasks/{taskId}/timelogs`
+ * instead of adding them as query params on `/timelogs` itself.
+ */
 export const ListTimelogsSchema = z
   .object({
-    folderId: z.string().optional(),
-    contactIds: z.array(z.string()).optional(),
-    categories: z.array(z.string()).optional(),
-    startDate: z.string().optional(),
-    endDate: z.string().optional(),
-    nextPageToken: z.string().optional(),
+    // Path-interpolated by the handler, so they get the same guard as every
+    // other id here: WrikeIdSchema keeps separators and traversal sequences
+    // out of an id that becomes part of a request path.
+    folderId: WrikeIdSchema.optional(),
+    taskId: WrikeIdSchema.optional(),
+    createdDate: InstantRangeSchema.optional(),
+    updatedDate: InstantRangeSchema.optional(),
+    trackedDate: LocalDateTimeRangeSchema.optional(),
+    me: z.boolean().optional(),
+    descendants: z.boolean().optional(),
+    plainText: z.boolean().optional(),
+    timelogCategories: z.array(z.string()).optional(),
+    exportStatuses: z.array(TimelogExportStatusSchema).optional(),
+    billingTypes: z.array(TimelogBillingTypeSchema).optional(),
+    approvalStatuses: z.array(TimelogApprovalStatusSchema).optional(),
+    // Bounds taken from Wrike's GET /timelogs reference, not invented:
+    // pageSize is documented as 1-1000, so it is capped there. `limit` is
+    // documented only as "Total record limit" with no ceiling, so none is
+    // imposed — a .max() here would be a guess, and guessing at the API
+    // contract is what produced the bugs this file is being fixed for.
+    // Response size is bounded by the default pageSize the handler sends
+    // (see list_timelogs), which is what actually governs a single response;
+    // limit only caps the total across pages.
+    limit: z.number().int().positive().optional(),
+    pageSize: z.number().int().positive().max(1000).optional(),
+    nextPageToken: z
+      .string()
+      .describe(
+        'Pagination token from a previous response. Repeat folderId or taskId on every ' +
+          'page: endpoint selection is keyed on those, not on the token, so a token sent ' +
+          'without the scoping id is served from the account-wide endpoint.'
+      )
+      .optional(),
     fields: z.array(z.string()).optional(),
   })
   .strict();
+// folderId and taskId select different endpoints, so passing both is a
+// contradiction rather than a combination — the handler rejects it (see
+// list_timelogs). That check cannot live here as a .refine(): the MCP SDK
+// registers a tool's input schema by reading its .shape, so a top-level
+// schema must stay a plain ZodObject. .refine() returns a ZodEffects wrapper
+// and every tool registration then fails with "expected a zod object schema".
+// (Nested schemas like TaskDatesSchema can use .refine() freely.)
 
 export const UpdateTimelogSchema = z
   .object({
-    timelogId: z.string().regex(/^([A-Z0-9]){8,16}$/),
+    timelogId: WrikeIdSchema,
     comment: z.string().optional(),
     hours: z.number().positive().optional(),
     trackedDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
@@ -319,14 +453,14 @@ export const UpdateTimelogSchema = z
   })
   .strict();
 
-export const DeleteTimelogSchema = z.object({ timelogId: z.string() }).strict();
+export const DeleteTimelogSchema = z.object({ timelogId: WrikeIdSchema }).strict();
 
 // --- Attachments -------------------------------------------------------------
 
 export const CreateAttachmentSchema = z
   .object({
     targetType: z.enum(['tasks', 'folders']),
-    targetId: z.string().regex(/^([A-Z0-9]){8,16}$/),
+    targetId: WrikeIdSchema,
     /** File name. */
     filename: z.string().min(1),
     /** Base64-encoded file content. */
@@ -342,7 +476,7 @@ export const CreateAttachmentSchema = z
 export const ListAttachmentsSchema = z
   .object({
     targetType: z.enum(['tasks', 'folders']),
-    targetId: z.string().regex(/^([A-Z0-9]){8,16}$/),
+    targetId: WrikeIdSchema,
     /** Wrike names this `withUrls` (plural); a `url` valid for 24h is added to each attachment. */
     withUrls: z.boolean().optional(),
     /** Include previous versions of each attachment. */
@@ -352,7 +486,7 @@ export const ListAttachmentsSchema = z
 
 export const GetAttachmentSchema = z
   .object({
-    attachmentId: z.string().regex(/^([A-Z0-9]){16}$/),
+    attachmentId: WrikeIdSchema,
     /**
      * What to return. Defaults to `'metadata'` when omitted.
      *
@@ -375,6 +509,6 @@ export const GetAttachmentSchema = z
   })
   .strict();
 
-export const DeleteAttachmentSchema = z.object({ attachmentId: z.string() }).strict();
+export const DeleteAttachmentSchema = z.object({ attachmentId: WrikeIdSchema }).strict();
 
 export const GetTimelogsSchema = ListTimelogsSchema;

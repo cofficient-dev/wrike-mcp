@@ -112,6 +112,25 @@ describe('tool validation and dispatch', () => {
     expect(path).toBe('/tasks/TASK1234/tasks/TASK1234'.replace('/tasks/TASK1234/tasks/TASK1234', '/tasks/TASK1234'));
   });
 
+  it('get_folder_tree hits /folders/{id}/folders with descendants, never /folders/{id}', async () => {
+    // Live sweep regression: GET /folders/{folderId} rejects `descendants`
+    // outright ("400 invalid_request: Parameter 'descendants' is not
+    // allowed") on every folder id, so this tool never worked. The
+    // documented subfolder-tree endpoint is /folders/{folderId}/folders.
+    const client = mockClient();
+    await byName('get_folder_tree').handler(client, { folderId: 'IEAGIITRIMFWG6YH' });
+    const [path, params] = (client.get as ReturnType<typeof vi.fn>).mock.calls[0] as unknown as [
+      string,
+      Record<string, unknown>,
+    ];
+    expect(path).toBe('/folders/IEAGIITRIMFWG6YH/folders');
+    expect(params).toMatchObject({ descendants: 'true' });
+    expect(client.get as ReturnType<typeof vi.fn>).not.toHaveBeenCalledWith(
+      '/folders/IEAGIITRIMFWG6YH',
+      expect.anything()
+    );
+  });
+
   it('list_spaces passes filters as query params', async () => {
     const client = mockClient();
     await byName('list_spaces').handler(client, { withArchived: true, title: 'Ops' });
@@ -134,11 +153,179 @@ describe('tool validation and dispatch', () => {
     ).rejects.toThrow();
   });
 
-  it('list_timelogs scopes to folder when folderId given', async () => {
-    const client = mockClient();
-    await byName('list_timelogs').handler(client, { folderId: 'IEAGIITR', startDate: '2026-01-01' });
-    const [path] = (client.get as ReturnType<typeof vi.fn>).mock.calls[0] as unknown as [string];
-    expect(path).toBe('/folders/IEAGIITR/timelogs');
+  describe('list_timelogs', () => {
+    // Live sweep found: contactIds -> "Parameter 'contactIds' is not
+    // allowed"; startDate -> "Parameter 'startDate' is not allowed"; an
+    // unfiltered call returned the account's entire timelog history
+    // (~257,000 lines) in one response because Wrike returns everything
+    // when neither pageSize nor limit is given.
+
+    it('scopes to folder when folderId is given', async () => {
+      const client = mockClient();
+      await byName('list_timelogs').handler(client, { folderId: 'IEAGIITR' });
+      const [path] = (client.get as ReturnType<typeof vi.fn>).mock.calls[0] as unknown as [string];
+      expect(path).toBe('/folders/IEAGIITR/timelogs');
+    });
+
+    it('scopes to task when taskId is given', async () => {
+      const client = mockClient();
+      await byName('list_timelogs').handler(client, { taskId: 'TASK1234' });
+      const [path] = (client.get as ReturnType<typeof vi.fn>).mock.calls[0] as unknown as [string];
+      expect(path).toBe('/tasks/TASK1234/timelogs');
+    });
+
+    it('hits the account-wide endpoint when neither folderId nor taskId is given', async () => {
+      const client = mockClient();
+      await byName('list_timelogs').handler(client, {});
+      const [path] = (client.get as ReturnType<typeof vi.fn>).mock.calls[0] as unknown as [string];
+      expect(path).toBe('/timelogs');
+    });
+
+    it('rejects the removed contactIds, startDate, endDate params', async () => {
+      await expect(
+        byName('list_timelogs').handler(mockClient(), { contactIds: ['KUABHKOF'] })
+      ).rejects.toThrow();
+      await expect(
+        byName('list_timelogs').handler(mockClient(), { startDate: '2026-01-01' })
+      ).rejects.toThrow();
+      await expect(
+        byName('list_timelogs').handler(mockClient(), { endDate: '2026-01-01' })
+      ).rejects.toThrow();
+    });
+
+    it('sends a bounded default pageSize when the caller gives no pageSize', async () => {
+      const client = mockClient();
+      await byName('list_timelogs').handler(client, {});
+      const [, params] = (client.get as ReturnType<typeof vi.fn>).mock.calls[0] as unknown as [
+        string,
+        Record<string, unknown>,
+      ];
+      expect(params.pageSize).toBe(200);
+      expect(params).not.toHaveProperty('limit');
+    });
+
+    it("respects the caller's own pageSize instead of overriding it", async () => {
+      const client = mockClient();
+      await byName('list_timelogs').handler(client, { pageSize: 50 });
+      const [, params] = (client.get as ReturnType<typeof vi.fn>).mock.calls[0] as unknown as [
+        string,
+        Record<string, unknown>,
+      ];
+      expect(params.pageSize).toBe(50);
+    });
+
+    it('still bounds the response when only limit is given', async () => {
+      // Only pageSize bounds a single response; limit caps the total across
+      // pages. Keying the default on "neither given" let limit suppress it, so
+      // a large limit reproduced the whole-account response this is here to
+      // prevent.
+      const client = mockClient();
+      await byName('list_timelogs').handler(client, { limit: 100000 });
+      const [, params] = (client.get as ReturnType<typeof vi.fn>).mock.calls[0] as unknown as [
+        string,
+        Record<string, unknown>,
+      ];
+      expect(params.limit).toBe(100000);
+      expect(params.pageSize).toBe(200);
+    });
+
+    it('passes a small caller limit through alongside the default pageSize', async () => {
+      const client = mockClient();
+      await byName('list_timelogs').handler(client, { limit: 10 });
+      const [, params] = (client.get as ReturnType<typeof vi.fn>).mock.calls[0] as unknown as [
+        string,
+        Record<string, unknown>,
+      ];
+      expect(params.limit).toBe(10);
+      expect(params.pageSize).toBe(200);
+    });
+
+    it('does not inject a default pageSize onto a nextPageToken continuation', async () => {
+      // The token resumes an already-paged query and carries that context —
+      // Wrike's docs say pageSize "can be omitted in this case". Injecting a
+      // default would silently re-page a caller who started with another size.
+      const client = mockClient();
+      await byName('list_timelogs').handler(client, { nextPageToken: 'tok123' });
+      const [, params] = (client.get as ReturnType<typeof vi.fn>).mock.calls[0] as unknown as [
+        string,
+        Record<string, unknown>,
+      ];
+      expect(params.nextPageToken).toBe('tok123');
+      expect(params).not.toHaveProperty('pageSize');
+    });
+
+    it("still honours an explicit pageSize alongside a continuation token", async () => {
+      const client = mockClient();
+      await byName('list_timelogs').handler(client, { nextPageToken: 'tok123', pageSize: 500 });
+      const [, params] = (client.get as ReturnType<typeof vi.fn>).mock.calls[0] as unknown as [
+        string,
+        Record<string, unknown>,
+      ];
+      expect(params.pageSize).toBe(500);
+    });
+
+    it('keeps routing to the folder endpoint when folderId is repeated alongside nextPageToken', async () => {
+      // Endpoint selection is keyed on folderId/taskId, not on the token, so
+      // a paged folder-scoped query must still resolve to the folder
+      // endpoint when the caller repeats folderId on the next page.
+      const client = mockClient();
+      await byName('list_timelogs').handler(client, {
+        folderId: 'IEAGIITR',
+        nextPageToken: 'tok123',
+      });
+      const [path, params] = (client.get as ReturnType<typeof vi.fn>).mock.calls[0] as unknown as [
+        string,
+        Record<string, unknown>,
+      ];
+      expect(path).toBe('/folders/IEAGIITR/timelogs');
+      expect(params.nextPageToken).toBe('tok123');
+    });
+
+    it('rejects folderId and taskId together rather than silently preferring one', async () => {
+      // They select different endpoints; preferring folderId would return
+      // folder-scoped results that read as task-scoped.
+      await expect(
+        byName('list_timelogs').handler(mockClient(), { folderId: 'IEAGIITR', taskId: 'TASK1234' })
+      ).rejects.toThrow(/not both/i);
+    });
+
+    it('rejects a folderId or taskId shaped like a path traversal', async () => {
+      // Both are interpolated into the request path by the handler.
+      await expect(
+        byName('list_timelogs').handler(mockClient(), { folderId: '../../account' })
+      ).rejects.toThrow();
+      await expect(
+        byName('list_timelogs').handler(mockClient(), { taskId: 'a/b' })
+      ).rejects.toThrow();
+    });
+
+    it('sends trackedDate as a range object, not loose startDate/endDate params', async () => {
+      const client = mockClient();
+      await byName('list_timelogs').handler(client, {
+        trackedDate: { start: '2026-01-01T00:00:00', end: '2026-01-31T23:59:59' },
+      });
+      const [, params] = (client.get as ReturnType<typeof vi.fn>).mock.calls[0] as unknown as [
+        string,
+        Record<string, unknown>,
+      ];
+      expect(JSON.parse(params.trackedDate as string)).toEqual({
+        start: '2026-01-01T00:00:00',
+        end: '2026-01-31T23:59:59',
+      });
+    });
+
+    it('accepts the documented filters (timelogCategories, exportStatuses, billingTypes, approvalStatuses, me, descendants)', async () => {
+      await expect(
+        byName('list_timelogs').handler(mockClient(), {
+          timelogCategories: ['CAT1'],
+          exportStatuses: ['Exported'],
+          billingTypes: ['Billable'],
+          approvalStatuses: ['Approved'],
+          me: true,
+          descendants: false,
+        })
+      ).resolves.toBeDefined();
+    });
   });
 
   it('create_attachment base64-decodes content and calls upload', async () => {
@@ -180,6 +367,43 @@ describe('tool validation and dispatch', () => {
     await expect(
       byName('get_task').handler(mockClient(), { taskId: 'TASK1234', bogus: 1 })
     ).rejects.toThrow();
+  });
+
+  describe('new-format (mixed-case) ids', () => {
+    // Live sweep regression: create_folder returned id MQAAAAEPpWtv, and
+    // passing that exact id straight back into another tool was rejected
+    // client-side by the old ^[A-Z0-9]{8,16}$ id patterns before the request
+    // ever reached Wrike. Anything created through this server was
+    // immediately unreachable. WrikeIdSchema (schemas.ts) fixes this; these
+    // are the round trips the sweep found broken.
+    const NEW_FORMAT_ID = 'MQAAAAEPpWtv';
+
+    it('create_task accepts a new-format folderId', async () => {
+      const client = mockClient();
+      await expect(
+        byName('create_task').handler(client, { folderId: NEW_FORMAT_ID, title: 'x' })
+      ).resolves.toBeDefined();
+      const [path] = (client.post as ReturnType<typeof vi.fn>).mock.calls[0] as unknown as [string];
+      expect(path).toBe(`/folders/${NEW_FORMAT_ID}/tasks`);
+    });
+
+    it('get_task accepts a new-format taskId', async () => {
+      const client = mockClient();
+      await expect(
+        byName('get_task').handler(client, { taskId: NEW_FORMAT_ID })
+      ).resolves.toBeDefined();
+      const [path] = (client.get as ReturnType<typeof vi.fn>).mock.calls[0] as unknown as [string];
+      expect(path).toBe(`/tasks/${NEW_FORMAT_ID}`);
+    });
+
+    it('add_comment accepts a new-format targetId', async () => {
+      const client = mockClient();
+      await expect(
+        byName('add_comment').handler(client, { targetType: 'tasks', targetId: NEW_FORMAT_ID, text: 'hi' })
+      ).resolves.toBeDefined();
+      const [path] = (client.post as ReturnType<typeof vi.fn>).mock.calls[0] as unknown as [string];
+      expect(path).toBe(`/tasks/${NEW_FORMAT_ID}/comments`);
+    });
   });
 });
 describe('attachment download', () => {
