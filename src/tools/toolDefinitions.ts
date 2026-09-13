@@ -289,7 +289,8 @@ export function buildTools(): ToolDefinition[] {
                 `is not given (Wrike returns the entire account's timelog history in one response ` +
                 `otherwise), use nextPageToken to continue. limit caps the total across pages and does ` +
                 `not bound a single response. folderId/taskId route to that folder's or task's timelogs ` +
-                `instead of filtering the account-wide endpoint.`,
+                `instead of filtering the account-wide endpoint. Repeat folderId/taskId on every page ` +
+                `when paging with nextPageToken: the scoping id, not the token, selects the endpoint.`,
             S.ListTimelogsSchema,
             (c, p) => {
                 const { folderId, taskId, limit, pageSize, ...rest } = p;
@@ -325,6 +326,17 @@ export function buildTools(): ToolDefinition[] {
                         ? DEFAULT_TIMELOG_PAGE_SIZE
                         : pageSize;
                 const params = query({ ...rest, limit, pageSize: bounded });
+                // Routing is keyed on folderId/taskId alone, not on
+                // nextPageToken — Wrike's docs don't say whether a
+                // continuation token itself carries endpoint scope (the
+                // /timelogs reference documents only the account-wide
+                // endpoint, not the folder/task variants), so that isn't
+                // assumed here. A caller who pages a scoped query must repeat
+                // folderId/taskId on every page or a token-only follow-up
+                // falls through to the account-wide endpoint below. That
+                // requirement is stated in the tool and schema descriptions
+                // rather than enforced here, since enforcing it would mean
+                // inventing a contract Wrike doesn't document.
                 if (folderId) return c.get(`/folders/${folderId}/timelogs`, params);
                 if (taskId) return c.get(`/tasks/${taskId}/timelogs`, params);
                 return c.get('/timelogs', params);

@@ -421,7 +421,14 @@ export const ListTimelogsSchema = z
     // limit only caps the total across pages.
     limit: z.number().int().positive().optional(),
     pageSize: z.number().int().positive().max(1000).optional(),
-    nextPageToken: z.string().optional(),
+    nextPageToken: z
+      .string()
+      .describe(
+        'Pagination token from a previous response. Repeat folderId or taskId on every ' +
+          'page: endpoint selection is keyed on those, not on the token, so a token sent ' +
+          'without the scoping id is served from the account-wide endpoint.'
+      )
+      .optional(),
     fields: z.array(z.string()).optional(),
   })
   .strict();

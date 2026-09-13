@@ -264,6 +264,23 @@ describe('tool validation and dispatch', () => {
       expect(params.pageSize).toBe(500);
     });
 
+    it('keeps routing to the folder endpoint when folderId is repeated alongside nextPageToken', async () => {
+      // Endpoint selection is keyed on folderId/taskId, not on the token, so
+      // a paged folder-scoped query must still resolve to the folder
+      // endpoint when the caller repeats folderId on the next page.
+      const client = mockClient();
+      await byName('list_timelogs').handler(client, {
+        folderId: 'IEAGIITR',
+        nextPageToken: 'tok123',
+      });
+      const [path, params] = (client.get as ReturnType<typeof vi.fn>).mock.calls[0] as unknown as [
+        string,
+        Record<string, unknown>,
+      ];
+      expect(path).toBe('/folders/IEAGIITR/timelogs');
+      expect(params.nextPageToken).toBe('tok123');
+    });
+
     it('rejects folderId and taskId together rather than silently preferring one', async () => {
       // They select different endpoints; preferring folderId would return
       // folder-scoped results that read as task-scoped.
