@@ -112,6 +112,25 @@ describe('tool validation and dispatch', () => {
     expect(path).toBe('/tasks/TASK1234/tasks/TASK1234'.replace('/tasks/TASK1234/tasks/TASK1234', '/tasks/TASK1234'));
   });
 
+  it('get_folder_tree hits /folders/{id}/folders with descendants, never /folders/{id}', async () => {
+    // Live sweep regression: GET /folders/{folderId} rejects `descendants`
+    // outright ("400 invalid_request: Parameter 'descendants' is not
+    // allowed") on every folder id, so this tool never worked. The
+    // documented subfolder-tree endpoint is /folders/{folderId}/folders.
+    const client = mockClient();
+    await byName('get_folder_tree').handler(client, { folderId: 'IEAGIITRIMFWG6YH' });
+    const [path, params] = (client.get as ReturnType<typeof vi.fn>).mock.calls[0] as unknown as [
+      string,
+      Record<string, unknown>,
+    ];
+    expect(path).toBe('/folders/IEAGIITRIMFWG6YH/folders');
+    expect(params).toMatchObject({ descendants: 'true' });
+    expect(client.get as ReturnType<typeof vi.fn>).not.toHaveBeenCalledWith(
+      '/folders/IEAGIITRIMFWG6YH',
+      expect.anything()
+    );
+  });
+
   it('list_spaces passes filters as query params', async () => {
     const client = mockClient();
     await byName('list_spaces').handler(client, { withArchived: true, title: 'Ops' });

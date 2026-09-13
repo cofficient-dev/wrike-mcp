@@ -119,8 +119,15 @@ export function buildTools(): ToolDefinition[] {
         def('list_folders', 'List folders, optionally scoped to a space.', S.ListFoldersSchema, (c, p) =>
             p.spaceId ? c.get(`/spaces/${p.spaceId}/folders`, query({ fields: p.fields })) : c.get('/folders')
         ),
+        // GET /folders/{folderId} does not accept `descendants` — a live
+        // sweep found every call here returning
+        // "400 (invalid_request): Parameter 'descendants' is not allowed",
+        // meaning this tool never worked. GET /folders/{folderId}/folders is
+        // the documented subfolder-tree endpoint and does accept it
+        // (boolean, default true, "Adds all descendant folders to search
+        // scope") — see https://developers.wrike.com/reference/getfolderssinglefolders.md
         def('get_folder_tree', 'Get the folder/project tree below a folder (use Root API ID for account tree).', S.GetFolderTreeSchema, (c, p) =>
-            c.get(`/folders/${p.folderId}`, { descendants: 'true' })
+            c.get(`/folders/${p.folderId}/folders`, { descendants: 'true' })
         ),
         def('create_folder', 'Create a folder/project under a parent folder.', S.CreateFolderSchema, (c, p) =>
             c.post(`/folders/${p.folderId}/folders`, query({ fields: p.fields }), {
