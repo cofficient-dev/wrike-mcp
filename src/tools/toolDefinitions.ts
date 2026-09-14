@@ -92,6 +92,24 @@ const MAX_INLINE_DOWNLOAD_BYTES = 5 * 1024 * 1024;
 const ACCEPTED_IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
 
 /**
+ * Cleans a raw Content-Type value into a bare, comparable MIME type: strips
+ * any `; charset=...` (or other) parameters, trims whitespace, lowercases
+ * (media types are case-insensitive per RFC 9110 — 'Image/PNG' is as valid as
+ * 'image/png'), and normalises the widespread non-standard 'image/jpg'
+ * spelling to 'image/jpeg'. Wrike is not obliged to send a tidy value in
+ * either the attachment metadata or the download response, so both are run
+ * through this one helper before ever touching ACCEPTED_IMAGE_MIME_TYPES —
+ * this cleaning has already needed fixing twice (parameters, then case), and
+ * a second inline copy for the response value would just be a third place to
+ * fix it again.
+ */
+function cleanMimeType(raw: string | undefined): string {
+    let clean = (raw?.split(';')[0] ?? '').trim().toLowerCase();
+    if (clean === 'image/jpg') clean = 'image/jpeg';
+    return clean;
+}
+
+/**
  * get_attachment's mode: 'download' note on a link result for an attachment
  * this server did not inline (i.e. anything but an accepted image): base64
  * file content has been removed entirely, so this is the only way to get
@@ -109,6 +127,18 @@ const DOWNLOAD_NOT_INLINED_NOTE =
 const DOWNLOAD_TOO_LARGE_NOTE =
     `Image is over the ${MAX_INLINE_DOWNLOAD_BYTES / (1024 * 1024)}MB inline limit, so it was not ` +
     "inlined — this link is how to fetch the file.";
+
+/**
+ * get_attachment's mode: 'download' note on a link result for an accepted
+ * image whose download response reported a different, non-image content type
+ * from the attachment's metadata. Distinct from the other two notes: this
+ * points at something genuinely odd about the attachment (stale or
+ * mislabelled metadata), not a routine size or type decision, so a reader
+ * can tell the cases apart.
+ */
+const DOWNLOAD_TYPE_MISMATCH_NOTE =
+    "File was not inlined because the download response reported a content type different from the " +
+    "attachment's metadata — this link is how to fetch the file.";
 
 /**
  * Default `pageSize` sent to GET /timelogs (and its folder/task-scoped
@@ -547,21 +577,9 @@ export function buildTools(): ToolDefinition[] {
                     return { ...link, note: link.note ?? fallbackNote };
                 };
 
-                // Wrike sends content types with parameters attached (an observed
-                // real value: 'image/png;charset=UTF-8') and media types are
-                // case-insensitive per RFC 9110 ('Image/PNG' is as valid as
-                // 'image/png') — an assumption live traffic is not obliged to
-                // honour either way. The allowlist check below must run against
-                // a cleaned value or it would miss both cases.
                 let cleanContentType = '';
                 if (!isExternal) {
-                    cleanContentType = (info?.contentType?.split(';')[0] ?? '').trim().toLowerCase();
-                    // 'image/jpg' is a widespread non-standard spelling of
-                    // 'image/jpeg' and a plausible stored value; normalise it
-                    // before the allowlist check so it isn't rejected on a
-                    // spelling technicality, and emit the correct mimeType
-                    // either way.
-                    if (cleanContentType === 'image/jpg') cleanContentType = 'image/jpeg';
+                    cleanContentType = cleanMimeType(info?.contentType);
                 }
 
                 if (isExternal || !ACCEPTED_IMAGE_MIME_TYPES.has(cleanContentType)) {
@@ -635,6 +653,38 @@ export function buildTools(): ToolDefinition[] {
                     }
                     throw err;
                 }
+
+                // The metadata's contentType decided we'd get this far, but it's
+                // only a prediction; the download response's own Content-Type,
+                // now that bytes are actually in hand, describes what was truly
+                // sent and is the more authoritative of the two when it has an
+                // opinion worth trusting. Re-run the same allowlist against it,
+                // cleaned through the same helper, with three possible outcomes:
+                //
+                //   1. It cleans to an accepted image: emit the image block
+                //      using THIS value as mimeType, not the metadata's, since
+                //      it describes the actual bytes.
+                //   2. It's absent, empty, or 'application/octet-stream': Wrike's
+                //      download endpoint (and getBinary itself, which substitutes
+                //      this exact string when the header is missing) is not
+                //      obliged to send a meaningful type, so this carries no
+                //      real opinion. Keep trusting the metadata-derived decision
+                //      already made rather than downgrading a perfectly good
+                //      image to a link over a generic non-answer.
+                //   3. It's present, meaningful, and NOT an accepted image (e.g.
+                //      'application/pdf'): a genuine disagreement between
+                //      metadata and reality. Don't emit an image block — fall
+                //      back to the link with a note that calls out the mismatch
+                //      specifically, distinct from the routine not-inlined and
+                //      too-large cases.
+                const responseContentType = cleanMimeType(file.contentType);
+                const responseHasOpinion =
+                    responseContentType !== '' && responseContentType !== 'application/octet-stream';
+                if (responseHasOpinion && !ACCEPTED_IMAGE_MIME_TYPES.has(responseContentType)) {
+                    return toLinkResult(DOWNLOAD_TYPE_MISMATCH_NOTE);
+                }
+                const emittedContentType = responseHasOpinion ? responseContentType : cleanContentType;
+
                 // Base64 is not repeated in the text block: that would put the
                 // context cost this exists to avoid right back in, next to the
                 // image block that already carries the same bytes.
@@ -642,11 +692,11 @@ export function buildTools(): ToolDefinition[] {
                     `attachmentId: ${p.attachmentId}`,
                     ...(file.filename ? [`filename: ${file.filename}`] : []),
                     `size: ${file.data.byteLength} bytes`,
-                    `contentType: ${cleanContentType}`,
+                    `contentType: ${emittedContentType}`,
                 ];
                 const imageResult: McpContentResult = {
                     __mcpContent: [
-                        { type: 'image', data: file.data.toString('base64'), mimeType: cleanContentType },
+                        { type: 'image', data: file.data.toString('base64'), mimeType: emittedContentType },
                         { type: 'text', text: metaLines.join('\n') },
                     ],
                 };

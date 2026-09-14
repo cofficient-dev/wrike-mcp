@@ -604,6 +604,107 @@ describe('attachment download', () => {
     expect(image.mimeType).toBe('image/jpeg');
   });
 
+  it("get_attachment with mode: 'download' still returns an image block when the download response's Content-Type agrees with the metadata", async () => {
+    const client = mockClient();
+    (client.get as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      kind: 'attachments',
+      data: [{ id: 'IEAGIITRIMFWG6YH', type: 'Wrike', contentType: 'image/png' }],
+    });
+    (client.getBinary as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      data: Buffer.from('PNGBYTES'),
+      contentType: 'image/png',
+      filename: 'shot.png',
+    });
+    const result = (await byName('get_attachment').handler(client, {
+      attachmentId: 'IEAGIITRIMFWG6YH',
+      mode: 'download',
+    })) as { __mcpContent: Array<Record<string, unknown>> };
+
+    const [image] = result.__mcpContent;
+    expect(image.mimeType).toBe('image/png');
+  });
+
+  it("get_attachment with mode: 'download' falls back to a link when the download response's Content-Type disagrees with image metadata (stale or mislabelled metadata)", async () => {
+    const client = mockClient();
+    (client.get as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      kind: 'attachments',
+      data: [{ id: 'IEAGIITRIMFWG6YH', type: 'Wrike', contentType: 'image/png' }],
+    });
+    (client.getBinary as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      data: Buffer.from('%PDF-1.4'),
+      contentType: 'application/pdf',
+      filename: 'shot.png',
+    });
+    const result = (await byName('get_attachment').handler(client, {
+      attachmentId: 'IEAGIITRIMFWG6YH',
+      mode: 'download',
+    })) as Record<string, unknown>;
+
+    expect(result).not.toHaveProperty('__mcpContent');
+    expect(result.url).toBe('https://mcp.example.com/wrike/attachments/IEAGIITRIMFWG6YH/file?token=abc');
+    expect(result.note as string).toMatch(/content type different from/i);
+  });
+
+  it("get_attachment with mode: 'download' still returns an image block when the download response's Content-Type is the generic 'application/octet-stream' (no downgrade on a non-answer)", async () => {
+    const client = mockClient();
+    (client.get as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      kind: 'attachments',
+      data: [{ id: 'IEAGIITRIMFWG6YH', type: 'Wrike', contentType: 'image/png' }],
+    });
+    (client.getBinary as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      data: Buffer.from('PNGBYTES'),
+      contentType: 'application/octet-stream',
+      filename: 'shot.png',
+    });
+    const result = (await byName('get_attachment').handler(client, {
+      attachmentId: 'IEAGIITRIMFWG6YH',
+      mode: 'download',
+    })) as { __mcpContent: Array<Record<string, unknown>> };
+
+    const [image] = result.__mcpContent;
+    expect(image.mimeType).toBe('image/png');
+  });
+
+  it("get_attachment with mode: 'download' still returns an image block when the download response has no Content-Type at all", async () => {
+    const client = mockClient();
+    (client.get as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      kind: 'attachments',
+      data: [{ id: 'IEAGIITRIMFWG6YH', type: 'Wrike', contentType: 'image/png' }],
+    });
+    (client.getBinary as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      data: Buffer.from('PNGBYTES'),
+      contentType: '',
+      filename: 'shot.png',
+    });
+    const result = (await byName('get_attachment').handler(client, {
+      attachmentId: 'IEAGIITRIMFWG6YH',
+      mode: 'download',
+    })) as { __mcpContent: Array<Record<string, unknown>> };
+
+    const [image] = result.__mcpContent;
+    expect(image.mimeType).toBe('image/png');
+  });
+
+  it("get_attachment with mode: 'download' applies the shared cleaning helper to the download response's Content-Type too (parameters and case stripped, and used as the emitted mimeType)", async () => {
+    const client = mockClient();
+    (client.get as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      kind: 'attachments',
+      data: [{ id: 'IEAGIITRIMFWG6YH', type: 'Wrike', contentType: 'image/png' }],
+    });
+    (client.getBinary as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      data: Buffer.from('PNGBYTES'),
+      contentType: 'IMAGE/PNG;charset=UTF-8',
+      filename: 'shot.png',
+    });
+    const result = (await byName('get_attachment').handler(client, {
+      attachmentId: 'IEAGIITRIMFWG6YH',
+      mode: 'download',
+    })) as { __mcpContent: Array<Record<string, unknown>> };
+
+    const [image] = result.__mcpContent;
+    expect(image.mimeType).toBe('image/png');
+  });
+
   it("get_attachment passes a byte budget to getBinary for an image download so an oversized file is rejected before buffering", async () => {
     const client = mockClient();
     (client.get as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
