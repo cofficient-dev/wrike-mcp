@@ -129,11 +129,3 @@ export class SessionManager {
     this.sessions.clear();
   }
 }
-
-/**
- * Backwards-compatible helper retained for tests.
- */
-export async function startTransport(mcpServer: McpServer): Promise<(req: Request, res: Response) => Promise<void>> {
-  const sessions = new SessionManager(() => mcpServer);
-  return (req, res) => sessions.handleRequest(req, res);
-}
