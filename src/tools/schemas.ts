@@ -26,11 +26,18 @@ import { z } from 'zod';
  *
  * The character set stays closed rather than becoming permissive: these ids
  * are frequently interpolated into a Wrike API URL path, and this schema is
- * what keeps path separators and traversal sequences out of that path. Widen
- * it again only against an observed id, never speculatively — this is the
- * second time this exact regex has needed correcting for missing one part of
- * a documented alphabet, and a third time should not repeat the pattern of
- * adding characters piecemeal instead of reasoning about the whole alphabet.
+ * what keeps path separators and traversal sequences out of that path. The
+ * rule for widening it is to complete an alphabet already evidenced by at
+ * least one genuinely observed id, not to add a character because it might
+ * plausibly appear: `-` and `_` went in together because `_` was observed
+ * live and both are part of the same documented base64url alphabet, not
+ * because either was guessed at. This is the second time this exact regex
+ * has needed correcting for missing part of a documented alphabet, and a
+ * third time should not repeat the pattern of adding characters piecemeal
+ * instead of reasoning about the whole alphabet — but "the whole alphabet"
+ * means base64url specifically, not every character that looks adjacent to
+ * it: base64 padding (`=`) is not part of base64url and must stay rejected
+ * even though it sits right next to the characters just added.
  *
  * The 128-char ceiling is a sanity bound, not a claim about the format: it
  * stops an arbitrarily long string being pushed through as a path segment,
@@ -39,12 +46,19 @@ import { z } from 'zod';
  * fix was a bound set too tightly around the ids that happened to be visible
  * at the time, and a cap of, say, 64 would repeat that mistake in miniature
  * if the format grows again.
+ *
+ * The pattern requires at least one alphanumeric character somewhere in the
+ * string (the leading lookahead): `-` and `_` are valid Wrike id characters
+ * but are not by themselves an id, and without this an all-symbol string
+ * (`____`, a bare `-`) would pass length and character-class checks alone.
+ * `.` and `/` stay outside the class entirely, so path traversal is excluded
+ * regardless of this lookahead.
  */
 export const WrikeIdSchema = z
   .string()
   .min(1)
   .max(128)
-  .regex(/^[A-Za-z0-9_-]+$/, 'Wrike API ID');
+  .regex(/^(?=.*[A-Za-z0-9])[A-Za-z0-9_-]+$/, 'Wrike API ID');
 
 export const TaskStatusSchema = z.enum(['Active', 'Deferred', 'Completed', 'Cancelled']);
 export const TaskImportanceSchema = z.enum(['High', 'Low', 'Normal']);

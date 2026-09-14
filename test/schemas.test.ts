@@ -71,6 +71,21 @@ describe('WrikeIdSchema', () => {
   it('rejects an id containing a space', () => {
     expect(WrikeIdSchema.safeParse('ABC DEF').success).toBe(false);
   });
+
+  it('rejects an all-symbol string with no alphanumeric character', () => {
+    // '-' and '_' are valid id characters but not an id by themselves.
+    expect(WrikeIdSchema.safeParse('____').success).toBe(false);
+    expect(WrikeIdSchema.safeParse('-').success).toBe(false);
+  });
+
+  it('accepts an id mixing symbols with alphanumerics anywhere, not just after the first character', () => {
+    expect(WrikeIdSchema.safeParse('MAAAAAEPp_4d').success).toBe(true);
+    expect(WrikeIdSchema.safeParse('_MAAAA-1').success).toBe(true);
+  });
+
+  it('rejects base64 padding — "=" is not part of the base64url alphabet', () => {
+    expect(WrikeIdSchema.safeParse('MAAAAAEPp4d=').success).toBe(false);
+  });
 });
 
 describe('WrikeIdSchema length bound', () => {
