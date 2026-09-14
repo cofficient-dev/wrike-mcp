@@ -511,6 +511,56 @@ describe('attachment download', () => {
     expect(image.mimeType).toBe('image/png');
   });
 
+  it("get_attachment with mode: 'download' treats content types case-insensitively (RFC 9110): 'IMAGE/PNG' still produces an image block with lowercase mimeType", async () => {
+    const client = mockClient();
+    (client.getBinary as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      data: Buffer.from('PNGBYTES'),
+      contentType: 'IMAGE/PNG',
+      filename: 'shot.png',
+    });
+    const result = (await byName('get_attachment').handler(client, {
+      attachmentId: 'IEAGIITRIMFWG6YH',
+      mode: 'download',
+    })) as { __mcpContent: Array<Record<string, unknown>> };
+
+    const [image] = result.__mcpContent;
+    expect(image.mimeType).toBe('image/png');
+  });
+
+  it("get_attachment with mode: 'download' does not turn an unsupported image subtype (image/svg+xml) into an image block", async () => {
+    const client = mockClient();
+    (client.getBinary as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      data: Buffer.from('<svg/>'),
+      contentType: 'image/svg+xml',
+      filename: 'icon.svg',
+    });
+    const result = (await byName('get_attachment').handler(client, {
+      attachmentId: 'IEAGIITRIMFWG6YH',
+      mode: 'download',
+    })) as Record<string, unknown>;
+
+    expect(result).not.toHaveProperty('__mcpContent');
+    expect(result.contentType).toBe('image/svg+xml');
+    expect(Buffer.from(result.content as string, 'base64').toString()).toBe('<svg/>');
+    expect(result.note as string).toMatch(/mode: 'url'/);
+  });
+
+  it("get_attachment with mode: 'download' normalises the non-standard 'image/jpg' spelling to 'image/jpeg' in the emitted mimeType", async () => {
+    const client = mockClient();
+    (client.getBinary as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      data: Buffer.from('JPGBYTES'),
+      contentType: 'image/jpg',
+      filename: 'photo.jpg',
+    });
+    const result = (await byName('get_attachment').handler(client, {
+      attachmentId: 'IEAGIITRIMFWG6YH',
+      mode: 'download',
+    })) as { __mcpContent: Array<Record<string, unknown>> };
+
+    const [image] = result.__mcpContent;
+    expect(image.mimeType).toBe('image/jpeg');
+  });
+
   it("get_attachment passes a byte budget to getBinary for mode: 'download' so oversized files are rejected before buffering", async () => {
     const client = mockClient();
     await byName('get_attachment').handler(client, { attachmentId: 'IEAGIITRIMFWG6YH', mode: 'download' });

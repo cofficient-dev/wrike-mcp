@@ -79,6 +79,16 @@ function def<T extends AnySchema>(
 const MAX_INLINE_DOWNLOAD_BYTES = 5 * 1024 * 1024;
 
 /**
+ * Raster subtypes an MCP `image` block is safe to carry. This is not an MCP
+ * restriction — the protocol places no limit on `mimeType` — it reflects
+ * what consuming models actually render. Anything outside this set (notably
+ * `image/svg+xml`, which is XML/markup rather than raster pixels, and
+ * `image/bmp`) falls back to the existing base64-in-JSON path instead of
+ * risking a block the client rejects outright and hands nothing back for.
+ */
+const ACCEPTED_IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+
+/**
  * Default `pageSize` sent to GET /timelogs (and its folder/task-scoped
  * variants) when the caller supplies neither `pageSize` nor `limit`. Wrike's
  * docs say plainly that omitting both returns every matching timelog in one
@@ -518,11 +528,19 @@ export function buildTools(): ToolDefinition[] {
                     throw err;
                 }
                 // Wrike sends content types with parameters attached (an observed
-                // real value: 'image/png;charset=UTF-8'). The MCP image block needs
-                // a clean media type, and the image/ check below must run against
-                // that same cleaned value or it would miss exactly this case.
-                const cleanContentType = (file.contentType.split(';')[0] ?? '').trim();
-                if (cleanContentType.startsWith('image/')) {
+                // real value: 'image/png;charset=UTF-8') and media types are
+                // case-insensitive per RFC 9110 ('Image/PNG' is as valid as
+                // 'image/png') — an assumption live traffic is not obliged to
+                // honour either way. The MCP image block needs a clean, lowercase
+                // media type, and the allowlist check below must run against that
+                // same cleaned value or it would miss both cases.
+                let cleanContentType = (file.contentType.split(';')[0] ?? '').trim().toLowerCase();
+                // 'image/jpg' is a widespread non-standard spelling of
+                // 'image/jpeg' and a plausible stored value; normalise it before
+                // the allowlist check so it isn't rejected on a spelling
+                // technicality, and emit the correct mimeType either way.
+                if (cleanContentType === 'image/jpg') cleanContentType = 'image/jpeg';
+                if (ACCEPTED_IMAGE_MIME_TYPES.has(cleanContentType)) {
                     // Base64 is not repeated in the text block: that would put the
                     // context cost this exists to avoid right back in, next to the
                     // image block that already carries the same bytes.
