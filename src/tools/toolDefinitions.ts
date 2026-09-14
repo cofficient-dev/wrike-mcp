@@ -1,5 +1,6 @@
 import type { WrikeClient } from '../wrikeClient.js';
 import { BinaryTooLargeError, WrikeApiError } from '../wrikeClient.js';
+import type { McpContentResult } from './toolRegistry.js';
 import * as S from './schemas.js';
 import { z } from 'zod';
 
@@ -76,6 +77,16 @@ function def<T extends AnySchema>(
  * client. Past this, list_attachments + withUrls hands back a 24h URL instead.
  */
 const MAX_INLINE_DOWNLOAD_BYTES = 5 * 1024 * 1024;
+
+/**
+ * Raster subtypes an MCP `image` block is safe to carry. This is not an MCP
+ * restriction — the protocol places no limit on `mimeType` — it reflects
+ * what consuming models actually render. Anything outside this set (notably
+ * `image/svg+xml`, which is XML/markup rather than raster pixels, and
+ * `image/bmp`) falls back to the existing base64-in-JSON path instead of
+ * risking a block the client rejects outright and hands nothing back for.
+ */
+const ACCEPTED_IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
 
 /**
  * Default `pageSize` sent to GET /timelogs (and its folder/task-scoped
@@ -395,7 +406,8 @@ export function buildTools(): ToolDefinition[] {
             "etc.) for an externally hosted one. Costs one or two Wrike calls. Use mode: 'download' " +
             "only when the calling program itself must operate on the bytes: hashing, parsing, " +
             "inspecting content. It returns the file base64-encoded, roughly a third bigger than the " +
-            "original, which is expensive in context and easy to corrupt. A sandboxed caller that must " +
+            "original, which is expensive in context and easy to corrupt. An image attachment is the " +
+            "exception: it comes back as a viewable image, not base64. A sandboxed caller that must " +
             "materialise the file itself should still try fetching the mode: 'url' link first: sandbox " +
             "egress is usually allowlisted, not blocked. Fall back to mode: 'download' only if that " +
             "fetch actually fails. mode: 'download' never works for an externally hosted attachment; " +
@@ -514,6 +526,37 @@ export function buildTools(): ToolDefinition[] {
                         );
                     }
                     throw err;
+                }
+                // Wrike sends content types with parameters attached (an observed
+                // real value: 'image/png;charset=UTF-8') and media types are
+                // case-insensitive per RFC 9110 ('Image/PNG' is as valid as
+                // 'image/png') — an assumption live traffic is not obliged to
+                // honour either way. The MCP image block needs a clean, lowercase
+                // media type, and the allowlist check below must run against that
+                // same cleaned value or it would miss both cases.
+                let cleanContentType = (file.contentType.split(';')[0] ?? '').trim().toLowerCase();
+                // 'image/jpg' is a widespread non-standard spelling of
+                // 'image/jpeg' and a plausible stored value; normalise it before
+                // the allowlist check so it isn't rejected on a spelling
+                // technicality, and emit the correct mimeType either way.
+                if (cleanContentType === 'image/jpg') cleanContentType = 'image/jpeg';
+                if (ACCEPTED_IMAGE_MIME_TYPES.has(cleanContentType)) {
+                    // Base64 is not repeated in the text block: that would put the
+                    // context cost this exists to avoid right back in, next to the
+                    // image block that already carries the same bytes.
+                    const metaLines = [
+                        `attachmentId: ${p.attachmentId}`,
+                        ...(file.filename ? [`filename: ${file.filename}`] : []),
+                        `size: ${file.data.byteLength} bytes`,
+                        `contentType: ${cleanContentType}`,
+                    ];
+                    const imageResult: McpContentResult = {
+                        __mcpContent: [
+                            { type: 'image', data: file.data.toString('base64'), mimeType: cleanContentType },
+                            { type: 'text', text: metaLines.join('\n') },
+                        ],
+                    };
+                    return imageResult;
                 }
                 return {
                     attachmentId: p.attachmentId,
