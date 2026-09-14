@@ -50,8 +50,68 @@ export class SessionManager {
     const sessionId = req.headers['mcp-session-id'] as string | undefined;
     let session = this.get(sessionId);
     if (!session) {
-      // New session — the HTTP layer has already authenticated req and stored
-      // the resolved user ID; see httpServer.ts.
+      if (sessionId) {
+        // The client sent an mcp-session-id, but nothing here matches it.
+        // Sessions live only in the in-memory `sessions` map above, so every
+        // restart (i.e. every deploy) discards them all without telling any
+        // connected client. Its next request still carries the old id, and
+        // this used to fall through to the "new session" branch below: a
+        // fresh session got created for whatever request the client actually
+        // sent — typically tools/call, not initialize — and handed to a
+        // transport that was never initialized, so it could not succeed. The
+        // client never received the one signal that would tell it to
+        // recover, and was left reporting "session expired" until a human
+        // disconnected and reconnected it by hand.
+        //
+        // The spec (Streamable HTTP, Session Management) is explicit about
+        // the fix:
+        //   3. The server MAY terminate the session at any time, after which
+        //      it MUST respond to requests containing that session ID with
+        //      HTTP 404 Not Found.
+        //   4. When a client receives HTTP 404 in response to a request
+        //      containing an Mcp-Session-Id, it MUST start a new session by
+        //      sending a new InitializeRequest without a session ID attached.
+        // Sending 404 here — instead of silently creating a session — is what
+        // makes that mandatory client-side recovery path actually trigger, so
+        // the client reinitializes itself within a second or two instead of
+        // needing manual intervention.
+        //
+        // initialize is deliberately NOT special-cased here: the spec requires
+        // the client to drop the mcp-session-id header when it reinitializes,
+        // so a stale id on an initialize request is a client bug. Honouring it
+        // anyway would paper over that bug and hand back a session bound to an
+        // id the client picked, not one this server generated, making the id
+        // meaningless as a capability.
+        //
+        // This 404 is the only signal a deploy dropped every session, so log
+        // it. Only the first 8 characters of the id are logged — the id is a
+        // capability (see redact.ts), and a prefix is enough to correlate
+        // repeated rejections from the same client without reproducing the
+        // whole thing in logs.
+        console.warn(
+          `[mcp] rejected unknown mcp-session-id (prefix ${sessionId.slice(0, 8)}...); client is expected to reinitialize`
+        );
+        // JSON-RPC 2.0 requires the error's id to match the request's, so a
+        // client dispatching by id can correlate this response. Fall back to
+        // null only when there genuinely is none: no body (GET/DELETE), a
+        // batch (array), a notification (no id), or an id of an illegal type
+        // (must be a string or number).
+        const body: unknown = req.body;
+        const rawId = body && typeof body === 'object' && !Array.isArray(body) ? (body as { id?: unknown }).id : undefined;
+        const requestId = typeof rawId === 'string' || typeof rawId === 'number' ? rawId : null;
+        res.status(404).json({
+          jsonrpc: '2.0',
+          error: {
+            code: -32001,
+            message: 'Session not found or expired. Reinitialize the connection with a new InitializeRequest.',
+          },
+          id: requestId,
+        });
+        return;
+      }
+      // No mcp-session-id header at all — this is the initialization case,
+      // unrelated to the above. The HTTP layer has already authenticated req
+      // and stored the resolved user ID; see httpServer.ts.
       const userId = (req as Request & { resolvedUserId?: string }).resolvedUserId;
       if (!userId) {
         throw new Error('unauthenticated session');
