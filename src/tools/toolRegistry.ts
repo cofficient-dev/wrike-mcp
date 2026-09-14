@@ -10,9 +10,8 @@ import type { UserId } from '../auth/authManager.js';
  * (e.g. an MCP `image` block) instead of being JSON-stringified into text.
  *
  * The key is deliberately unusual: a handler's real result can legitimately
- * have its own `content` field (get_attachment's download shape does, holding
- * base64), so detection must not key on that name or it would misread real
- * data as this marker.
+ * have its own `content` field of its own devising, so detection must not
+ * key on that name or it would misread real data as this marker.
  */
 export interface McpContentResult {
   __mcpContent: NonNullable<CallToolResult['content']>;

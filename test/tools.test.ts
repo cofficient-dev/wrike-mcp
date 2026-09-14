@@ -363,7 +363,7 @@ describe('tool validation and dispatch', () => {
     }
   });
 
-  it("get_attachment description steers a person's download/get/save request to mode: 'url' first, and still flags the external-hosting restriction on mode: 'download'", () => {
+  it("get_attachment description sends a person's download/get/save request to mode: 'url', and says mode: 'download' returns a link for anything but an image (no base64 anywhere)", () => {
     const { description } = byName('get_attachment');
     // The decision rule has to be read before the calling model reaches
     // mode: 'download', not discovered as a prohibition after the fact.
@@ -375,10 +375,12 @@ describe('tool validation and dispatch', () => {
     expect(urlPos).toBeGreaterThanOrEqual(0);
     expect(downloadPos).toBeGreaterThanOrEqual(0);
     expect(urlPos).toBeLessThan(downloadPos);
-    expect(description).toMatch(/download/i);
     expect(description).toMatch(/get me/i);
     expect(description).toMatch(/save/i);
     expect(description).toMatch(/externally hosted attachment/i);
+    // The whole point of this change: base64 is gone, and the description
+    // must not describe a path that no longer exists.
+    expect(description).not.toMatch(/base64/i);
   });
 
   it('rejects unknown fields strictly (no passthrough)', async () => {
@@ -444,31 +446,61 @@ describe('attachment download', () => {
     expect(client.getBinary as ReturnType<typeof vi.fn>).not.toHaveBeenCalled();
   });
 
-  it("get_attachment with mode: 'download' returns base64 file content plus a do-not-relay note for a non-image attachment", async () => {
+  it("get_attachment with mode: 'download' returns a link, not base64, for a non-image attachment, and never calls getBinary", async () => {
     const client = mockClient();
+    (client.get as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      kind: 'attachments',
+      data: [{ id: 'IEAGIITRIMFWG6YH', type: 'Wrike', contentType: 'application/pdf' }],
+    });
     const result = (await byName('get_attachment').handler(client, {
       attachmentId: 'IEAGIITRIMFWG6YH',
       mode: 'download',
     })) as Record<string, unknown>;
 
-    const [path] = (client.getBinary as ReturnType<typeof vi.fn>).mock.calls[0];
-    expect(path).toBe('/attachments/IEAGIITRIMFWG6YH/download');
-    expect(result.encoding).toBe('base64');
-    expect(Buffer.from(result.content as string, 'base64').toString()).toBe('PDFBYTES');
-    expect(result.contentType).toBe('application/pdf');
-    expect(result.filename).toBe('doc.pdf');
-    expect(result.size).toBe(8);
-    // The field the caller is already reading, telling it not to retype this
-    // content verbatim to a person and to use mode: 'url' instead.
-    expect(typeof result.note).toBe('string');
-    expect(result.note as string).toMatch(/mode: 'url'/);
-    // Not the image-content marker: this is a plain object still destined for
-    // JSON.stringify, and must not carry the __mcpContent opt-out key.
+    // Metadata decides this is a non-image before any bytes are fetched.
+    expect(client.getBinary as ReturnType<typeof vi.fn>).not.toHaveBeenCalled();
+    expect(client.signedDownloadUrl as ReturnType<typeof vi.fn>).toHaveBeenCalledWith('IEAGIITRIMFWG6YH');
+    expect(result.url).toBe('https://mcp.example.com/wrike/attachments/IEAGIITRIMFWG6YH/file?token=abc');
+    // Base64 file content no longer exists anywhere in the shape.
+    expect(result).not.toHaveProperty('content');
+    expect(result).not.toHaveProperty('encoding');
     expect(result).not.toHaveProperty('__mcpContent');
+    expect(result.note as string).toMatch(/not returned as base64/i);
+  });
+
+  it("get_attachment with mode: 'download' returns the provider's own URL for an externally hosted attachment, without calling getBinary", async () => {
+    const client = mockClient();
+    (client.get as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce({
+        kind: 'attachments',
+        data: [{ id: 'IEAGIITRIMFWG6YH', type: 'OneDrive', taskId: 'IEAGIITR' }],
+      })
+      .mockResolvedValueOnce({
+        kind: 'attachments',
+        data: [{ id: 'IEAGIITRIMFWG6YH', url: 'https://cofficientcouk.sharepoint.com/file123' }],
+      });
+    const result = (await byName('get_attachment').handler(client, {
+      attachmentId: 'IEAGIITRIMFWG6YH',
+      mode: 'download',
+    })) as Record<string, unknown>;
+
+    // Previously a Wrike 400 (the download endpoint only serves what Wrike
+    // itself stores); now the same link mode: 'url' would return.
+    expect(client.getBinary as ReturnType<typeof vi.fn>).not.toHaveBeenCalled();
+    expect(result.url).toBe('https://cofficientcouk.sharepoint.com/file123');
+    expect(result.type).toBe('OneDrive');
+    // The existing external-hosting note is preserved as-is, not replaced or
+    // duplicated with a second "not inlined" note.
+    expect(result.note).toMatch(/hosted by OneDrive/);
+    expect(result).not.toHaveProperty('content');
   });
 
   it("get_attachment with mode: 'download' returns an MCP image block for an image attachment, with metadata but no base64 in the text block", async () => {
     const client = mockClient();
+    (client.get as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      kind: 'attachments',
+      data: [{ id: 'IEAGIITRIMFWG6YH', type: 'Wrike', contentType: 'image/png' }],
+    });
     (client.getBinary as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
       data: Buffer.from('PNGBYTES'),
       contentType: 'image/png',
@@ -497,6 +529,10 @@ describe('attachment download', () => {
 
   it("get_attachment with mode: 'download' strips content-type parameters (e.g. Wrike's 'image/png;charset=UTF-8') before deciding it's an image and before setting mimeType", async () => {
     const client = mockClient();
+    (client.get as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      kind: 'attachments',
+      data: [{ id: 'IEAGIITRIMFWG6YH', type: 'Wrike', contentType: 'image/png;charset=UTF-8' }],
+    });
     (client.getBinary as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
       data: Buffer.from('PNGBYTES'),
       contentType: 'image/png;charset=UTF-8',
@@ -513,6 +549,10 @@ describe('attachment download', () => {
 
   it("get_attachment with mode: 'download' treats content types case-insensitively (RFC 9110): 'IMAGE/PNG' still produces an image block with lowercase mimeType", async () => {
     const client = mockClient();
+    (client.get as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      kind: 'attachments',
+      data: [{ id: 'IEAGIITRIMFWG6YH', type: 'Wrike', contentType: 'IMAGE/PNG' }],
+    });
     (client.getBinary as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
       data: Buffer.from('PNGBYTES'),
       contentType: 'IMAGE/PNG',
@@ -527,26 +567,29 @@ describe('attachment download', () => {
     expect(image.mimeType).toBe('image/png');
   });
 
-  it("get_attachment with mode: 'download' does not turn an unsupported image subtype (image/svg+xml) into an image block", async () => {
+  it("get_attachment with mode: 'download' does not treat an unsupported image subtype (image/svg+xml) as an image, and returns a link without calling getBinary", async () => {
     const client = mockClient();
-    (client.getBinary as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
-      data: Buffer.from('<svg/>'),
-      contentType: 'image/svg+xml',
-      filename: 'icon.svg',
+    (client.get as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      kind: 'attachments',
+      data: [{ id: 'IEAGIITRIMFWG6YH', type: 'Wrike', contentType: 'image/svg+xml' }],
     });
     const result = (await byName('get_attachment').handler(client, {
       attachmentId: 'IEAGIITRIMFWG6YH',
       mode: 'download',
     })) as Record<string, unknown>;
 
+    expect(client.getBinary as ReturnType<typeof vi.fn>).not.toHaveBeenCalled();
     expect(result).not.toHaveProperty('__mcpContent');
-    expect(result.contentType).toBe('image/svg+xml');
-    expect(Buffer.from(result.content as string, 'base64').toString()).toBe('<svg/>');
-    expect(result.note as string).toMatch(/mode: 'url'/);
+    expect(result).not.toHaveProperty('content');
+    expect(result.url).toBe('https://mcp.example.com/wrike/attachments/IEAGIITRIMFWG6YH/file?token=abc');
   });
 
   it("get_attachment with mode: 'download' normalises the non-standard 'image/jpg' spelling to 'image/jpeg' in the emitted mimeType", async () => {
     const client = mockClient();
+    (client.get as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      kind: 'attachments',
+      data: [{ id: 'IEAGIITRIMFWG6YH', type: 'Wrike', contentType: 'image/jpg' }],
+    });
     (client.getBinary as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
       data: Buffer.from('JPGBYTES'),
       contentType: 'image/jpg',
@@ -561,8 +604,12 @@ describe('attachment download', () => {
     expect(image.mimeType).toBe('image/jpeg');
   });
 
-  it("get_attachment passes a byte budget to getBinary for mode: 'download' so oversized files are rejected before buffering", async () => {
+  it("get_attachment passes a byte budget to getBinary for an image download so an oversized file is rejected before buffering", async () => {
     const client = mockClient();
+    (client.get as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      kind: 'attachments',
+      data: [{ id: 'IEAGIITRIMFWG6YH', type: 'Wrike', contentType: 'image/png' }],
+    });
     await byName('get_attachment').handler(client, { attachmentId: 'IEAGIITRIMFWG6YH', mode: 'download' });
     const call = (client.getBinary as ReturnType<typeof vi.fn>).mock.calls[0];
     // Enforcement lives inside getBinary (Content-Length check, then a
@@ -571,18 +618,26 @@ describe('attachment download', () => {
     expect(call[3]).toBeGreaterThan(0);
   });
 
-  it("get_attachment turns BinaryTooLargeError into a message naming mode: 'url'", async () => {
+  it("get_attachment lets BinaryTooLargeError propagate unchanged for an oversized image download, now that mode: 'download' no longer rewrites it into an 'over the inline limit' message", async () => {
     const client = mockClient();
+    (client.get as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      kind: 'attachments',
+      data: [{ id: 'IEAGIITRIMFWG6YH', type: 'Wrike', contentType: 'image/png' }],
+    });
     (client.getBinary as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
       new BinaryTooLargeError(6 * 1024 * 1024, 5 * 1024 * 1024)
     );
     await expect(
       byName('get_attachment').handler(client, { attachmentId: 'IEAGIITRIMFWG6YH', mode: 'download' })
-    ).rejects.toThrow(/mode: 'url'/);
+    ).rejects.toThrow(BinaryTooLargeError);
   });
 
-  it("get_attachment lets a non-size error from getBinary pass through unchanged for mode: 'download'", async () => {
+  it("get_attachment lets a non-size error from getBinary pass through unchanged for an image mode: 'download'", async () => {
     const client = mockClient();
+    (client.get as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      kind: 'attachments',
+      data: [{ id: 'IEAGIITRIMFWG6YH', type: 'Wrike', contentType: 'image/png' }],
+    });
     (client.getBinary as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('network blip'));
     await expect(
       byName('get_attachment').handler(client, { attachmentId: 'IEAGIITRIMFWG6YH', mode: 'download' })
@@ -715,8 +770,12 @@ describe('attachment download', () => {
     expect(caught?.message).not.toMatch(/try list_attachments/i);
   });
 
-  it("get_attachment with mode: 'download' surfaces Wrike's 'URL method only' 400 by pointing at mode: 'url'", async () => {
+  it("get_attachment with mode: 'download' surfaces Wrike's 'URL method only' 400 by pointing at mode: 'url' (safety net for an image whose metadata didn't reveal it was hosted externally)", async () => {
     const client = mockClient();
+    (client.get as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      kind: 'attachments',
+      data: [{ id: 'IEAGIITRIMFWG6YH', contentType: 'image/png' }], // no `type` reported
+    });
     (client.getBinary as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
       new WrikeApiError(400, 'invalid_request', 'Wrike API error 400 (invalid_request): Attachment can be accessed via URL method only')
     );
