@@ -28,6 +28,34 @@ describe('WrikeIdSchema', () => {
     expect(WrikeIdSchema.safeParse('MAAAAAEPpWr8').success).toBe(true);
   });
 
+  it('accepts a new-format id containing an underscore (fb52f2e follow-up)', () => {
+    // Real id returned by get_task in production. fb52f2e widened the regex
+    // to accept mixed case but missed the other two characters of the
+    // base64url alphabet, so this exact id was rejected by our own
+    // validation before ever reaching Wrike — including on delete_task,
+    // making the task unreachable through this server entirely.
+    expect(WrikeIdSchema.safeParse('MAAAAAEPp_4d').success).toBe(true);
+  });
+
+  it('accepts a new-format id containing a hyphen', () => {
+    // Not yet observed live, but part of the same base64url alphabet as the
+    // underscore case above, and the alphabet — not one specific character —
+    // is the evidence for widening this pattern.
+    expect(WrikeIdSchema.safeParse('MAAAAAEPp-4d').success).toBe(true);
+  });
+
+  it('still accepts previously working shapes after the widening', () => {
+    // Old-format and mixed-case new-format ids must keep passing: adding
+    // '-' and '_' to the alphabet must not narrow it anywhere else.
+    expect(WrikeIdSchema.safeParse('IEACK5SYKQI3XWVH').success).toBe(true);
+    expect(WrikeIdSchema.safeParse('MAAAAAEBTsyX').success).toBe(true);
+  });
+
+  it('rejects a value containing ".."', () => {
+    expect(WrikeIdSchema.safeParse('..').success).toBe(false);
+    expect(WrikeIdSchema.safeParse('MAAAAAEPp..d').success).toBe(false);
+  });
+
   it('rejects an empty string', () => {
     expect(WrikeIdSchema.safeParse('').success).toBe(false);
   });
