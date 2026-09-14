@@ -75,6 +75,22 @@ export class SessionManager {
         // makes that mandatory client-side recovery path actually trigger, so
         // the client reinitializes itself within a second or two instead of
         // needing manual intervention.
+        //
+        // initialize is deliberately NOT special-cased here: the spec requires
+        // the client to drop the mcp-session-id header when it reinitializes,
+        // so a stale id on an initialize request is a client bug. Honouring it
+        // anyway would paper over that bug and hand back a session bound to an
+        // id the client picked, not one this server generated, making the id
+        // meaningless as a capability.
+        //
+        // This 404 is the only signal a deploy dropped every session, so log
+        // it. Only the first 8 characters of the id are logged — the id is a
+        // capability (see redact.ts), and a prefix is enough to correlate
+        // repeated rejections from the same client without reproducing the
+        // whole thing in logs.
+        console.warn(
+          `[mcp] rejected unknown mcp-session-id (prefix ${sessionId.slice(0, 8)}...); client is expected to reinitialize`
+        );
         res.status(404).json({
           jsonrpc: '2.0',
           error: {

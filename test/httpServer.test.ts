@@ -153,6 +153,28 @@ describe('mcp session recovery after a restart (unknown mcp-session-id)', () => 
     expect(res.headers['mcp-session-id']).toBeUndefined();
   });
 
+  it('still 404s an initialize request that carries a stale mcp-session-id (not special-cased)', async () => {
+    // The spec requires a reinitializing client to send InitializeRequest
+    // WITHOUT a session ID attached. A client that (incorrectly) keeps
+    // sending its old mcp-session-id header on initialize gets the same 404
+    // as any other request with an unknown id: handleRequest does not
+    // special-case the initialize method. That is correct per spec, but it
+    // means a client with this bug never recovers on its own — every retry
+    // still carries the stale header, so every retry 404s again, forever.
+    // This test exists so that failure mode is found here, in a test that
+    // explains it, rather than rediscovered from a support ticket about a
+    // client stuck in a 404 loop.
+    const { app } = makeApp(patConfig());
+    const res = await request(app)
+      .post('/mcp')
+      .set('mcp-session-id', 'no-such-session-id')
+      .set('Accept', 'application/json, text/event-stream')
+      .send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 't', version: '0' } } });
+
+    expect(res.status).toBe(404);
+    expect(res.headers['mcp-session-id']).toBeUndefined();
+  });
+
   it('still creates a session and returns mcp-session-id when no header is sent at all (unchanged)', async () => {
     const { app } = makeApp(patConfig());
     const res = await request(app)
