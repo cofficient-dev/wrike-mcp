@@ -9,15 +9,35 @@ import { z } from 'zod';
  *
  * Wrike documents no pattern for these — the OpenAPI definitions type them as
  * plain strings — so a strict client-side shape was never justified by the
- * API contract. This account mints both legacy uppercase ids
- * (`IEACK5SYI7777777`, 16 chars; `KUABHKOF`, 8 chars) and newer mixed-case
- * ones (`MQAAAAEPpWtv`, 12 chars). A live sweep found every prior
- * `^[A-Z0-9]{8,16}$`-shaped regex in this file rejecting the new format on
- * length and case, meaning anything this server created (e.g. via
- * `create_folder`) was immediately unreachable by every other tool that took
- * its id back as input. Kept alphanumeric-only rather than dropped entirely:
- * it still catches obvious junk and, since these ids are frequently
- * interpolated into a URL path, keeps separators and traversal sequences out.
+ * API contract. This account mints legacy uppercase ids (`IEACK5SYI7777777`,
+ * 16 chars; `KUABHKOF`, 8 chars) and newer ids that are base64url-encoded
+ * (alphabet `A-Z a-z 0-9 - _`), e.g. `MQAAAAEPpWtv`.
+ *
+ * History: fb52f2e ("fix(schemas): accept new-format mixed-case Wrike ids")
+ * widened this pattern from `^[A-Z0-9]{8,16}$` to `^[A-Za-z0-9]+$` after new
+ * ids started appearing, but only added the letter case — it missed the
+ * other two characters of the same base64url alphabet, `-` and `_`. That
+ * left a steady fraction of new ids (roughly one in ten, by the account's
+ * own numbers) rejected by this server's own validation before ever reaching
+ * Wrike, e.g. `MAAAAAEPp_4d`, observed live on a task returned by this same
+ * server and then unreachable through it, including for `delete_task`. `-`
+ * and `_` are added now on that same evidence: they complete the base64url
+ * alphabet and one of them is a real production id.
+ *
+ * The character set stays closed rather than becoming permissive: these ids
+ * are frequently interpolated into a Wrike API URL path, and this schema is
+ * what keeps path separators and traversal sequences out of that path. The
+ * rule for widening it is to complete an alphabet already evidenced by at
+ * least one genuinely observed id, not to add a character because it might
+ * plausibly appear: `-` and `_` went in together because `_` was observed
+ * live and both are part of the same documented base64url alphabet, not
+ * because either was guessed at. This is the second time this exact regex
+ * has needed correcting for missing part of a documented alphabet, and a
+ * third time should not repeat the pattern of adding characters piecemeal
+ * instead of reasoning about the whole alphabet — but "the whole alphabet"
+ * means base64url specifically, not every character that looks adjacent to
+ * it: base64 padding (`=`) is not part of base64url and must stay rejected
+ * even though it sits right next to the characters just added.
  *
  * The 128-char ceiling is a sanity bound, not a claim about the format: it
  * stops an arbitrarily long string being pushed through as a path segment,
@@ -26,12 +46,19 @@ import { z } from 'zod';
  * fix was a bound set too tightly around the ids that happened to be visible
  * at the time, and a cap of, say, 64 would repeat that mistake in miniature
  * if the format grows again.
+ *
+ * The pattern requires at least one alphanumeric character somewhere in the
+ * string (the leading lookahead): `-` and `_` are valid Wrike id characters
+ * but are not by themselves an id, and without this an all-symbol string
+ * (`____`, a bare `-`) would pass length and character-class checks alone.
+ * `.` and `/` stay outside the class entirely, so path traversal is excluded
+ * regardless of this lookahead.
  */
 export const WrikeIdSchema = z
   .string()
   .min(1)
   .max(128)
-  .regex(/^[A-Za-z0-9]+$/, 'Wrike API ID');
+  .regex(/^(?=.*[A-Za-z0-9])[A-Za-z0-9_-]+$/, 'Wrike API ID');
 
 export const TaskStatusSchema = z.enum(['Active', 'Deferred', 'Completed', 'Cancelled']);
 export const TaskImportanceSchema = z.enum(['High', 'Low', 'Normal']);
