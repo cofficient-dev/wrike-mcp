@@ -1,5 +1,5 @@
 import type { WrikeClient } from '../wrikeClient.js';
-import { WrikeApiError } from '../wrikeClient.js';
+import { BinaryTooLargeError, WrikeApiError } from '../wrikeClient.js';
 import type { McpContentResult } from './toolRegistry.js';
 import * as S from './schemas.js';
 import { z } from 'zod';
@@ -99,6 +99,16 @@ const ACCEPTED_IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif
  */
 const DOWNLOAD_NOT_INLINED_NOTE =
     "File content is not returned as base64 any more — this link is how to fetch the file.";
+
+/**
+ * get_attachment's mode: 'download' note on a link result for an accepted
+ * image that was not inlined solely because it was too large — distinct from
+ * DOWNLOAD_NOT_INLINED_NOTE so the caller knows retrying won't help, only the
+ * link will.
+ */
+const DOWNLOAD_TOO_LARGE_NOTE =
+    `Image is over the ${MAX_INLINE_DOWNLOAD_BYTES / (1024 * 1024)}MB inline limit, so it was not ` +
+    "inlined — this link is how to fetch the file.";
 
 /**
  * Default `pageSize` sent to GET /timelogs (and its folder/task-scoped
@@ -522,11 +532,20 @@ export function buildTools(): ToolDefinition[] {
                 // fetching that first means a non-image attachment (a 700KB
                 // PDF, say) never has its body pulled down only to be thrown
                 // away for a link.
-                const meta = await c.get<Array<AttachmentLinkMeta & { contentType?: string }>>(
+                const meta = await c.get<Array<AttachmentLinkMeta & { contentType?: string; size?: number }>>(
                     `/attachments/${p.attachmentId}`
                 );
                 const info = meta.data[0];
                 const isExternal = Boolean(info?.type && info.type !== 'Wrike');
+
+                // Builds the same link-plus-note shape from every non-inlined
+                // path below (non-image, externally hosted, or an oversized
+                // image caught before or after the fetch) so there is exactly
+                // one place that assembles it.
+                const toLinkResult = async (fallbackNote: string) => {
+                    const link = await resolveAttachmentLink(c, p.attachmentId, info);
+                    return { ...link, note: link.note ?? fallbackNote };
+                };
 
                 // Wrike sends content types with parameters attached (an observed
                 // real value: 'image/png;charset=UTF-8') and media types are
@@ -553,8 +572,18 @@ export function buildTools(): ToolDefinition[] {
                     // the same link mode: 'url' returns; the external-hosting
                     // note it carries is preserved as-is, and a Wrike-hosted
                     // link gets the not-inlined note added instead.
-                    const link = await resolveAttachmentLink(c, p.attachmentId, info);
-                    return { ...link, note: link.note ?? DOWNLOAD_NOT_INLINED_NOTE };
+                    return toLinkResult(DOWNLOAD_NOT_INLINED_NOTE);
+                }
+
+                // Pre-check on the metadata's declared size, before fetching
+                // any bytes: an accepted image already over the inline budget
+                // goes straight to the link, the same one the non-image path
+                // above returns, rather than pulling up to 5MB over the wire
+                // only to discard it. `size` is -1 for an externally hosted
+                // attachment, but that case was already routed to the link
+                // path above, so a real byte count is all that reaches here.
+                if (typeof info?.size === 'number' && info.size > MAX_INLINE_DOWNLOAD_BYTES) {
+                    return toLinkResult(DOWNLOAD_TOO_LARGE_NOTE);
                 }
 
                 // Accepted image: fetch the bytes and return an MCP image
@@ -567,6 +596,17 @@ export function buildTools(): ToolDefinition[] {
                 try {
                     file = await c.getBinary(`/attachments/${p.attachmentId}/download`, {}, 0, MAX_INLINE_DOWNLOAD_BYTES);
                 } catch (err) {
+                    // Safety net: the pre-check above trusts Wrike's reported
+                    // metadata `size`, but getBinary enforces the real limit —
+                    // first from Content-Length, then by counting bytes as
+                    // they stream — which is the authority. If the two ever
+                    // disagree (stale or missing metadata size), still fall
+                    // back to the link rather than raising, for the same
+                    // reason the pre-check exists: mode: 'download' should
+                    // always return something usable.
+                    if (err instanceof BinaryTooLargeError) {
+                        return toLinkResult(DOWNLOAD_TOO_LARGE_NOTE);
+                    }
                     // Safety net only: the isExternal check above should already
                     // have routed an externally hosted attachment to the link
                     // path before this is reached. Kept in case metadata ever

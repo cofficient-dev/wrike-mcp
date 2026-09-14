@@ -618,18 +618,45 @@ describe('attachment download', () => {
     expect(call[3]).toBeGreaterThan(0);
   });
 
-  it("get_attachment lets BinaryTooLargeError propagate unchanged for an oversized image download, now that mode: 'download' no longer rewrites it into an 'over the inline limit' message", async () => {
+  it("get_attachment with mode: 'download' falls back to a link, not an error, when metadata's declared size already exceeds the inline limit — and never calls getBinary (pre-check)", async () => {
     const client = mockClient();
     (client.get as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
       kind: 'attachments',
-      data: [{ id: 'IEAGIITRIMFWG6YH', type: 'Wrike', contentType: 'image/png' }],
+      data: [
+        { id: 'IEAGIITRIMFWG6YH', type: 'Wrike', contentType: 'image/png', size: 6 * 1024 * 1024 },
+      ],
+    });
+    const result = (await byName('get_attachment').handler(client, {
+      attachmentId: 'IEAGIITRIMFWG6YH',
+      mode: 'download',
+    })) as Record<string, unknown>;
+
+    // The whole point of the pre-check: an oversized image is caught from
+    // metadata alone, before pulling any bytes over the wire.
+    expect(client.getBinary as ReturnType<typeof vi.fn>).not.toHaveBeenCalled();
+    expect(result).not.toHaveProperty('__mcpContent');
+    expect(result.url).toBe('https://mcp.example.com/wrike/attachments/IEAGIITRIMFWG6YH/file?token=abc');
+    expect(result.note as string).toMatch(/too large|over the.*inline limit/i);
+  });
+
+  it("get_attachment with mode: 'download' falls back to a link, not BinaryTooLargeError, when getBinary rejects even though metadata's declared size passed the pre-check (safety net for a size Wrike under-reported)", async () => {
+    const client = mockClient();
+    (client.get as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      kind: 'attachments',
+      data: [{ id: 'IEAGIITRIMFWG6YH', type: 'Wrike', contentType: 'image/png', size: 1024 }],
     });
     (client.getBinary as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
       new BinaryTooLargeError(6 * 1024 * 1024, 5 * 1024 * 1024)
     );
-    await expect(
-      byName('get_attachment').handler(client, { attachmentId: 'IEAGIITRIMFWG6YH', mode: 'download' })
-    ).rejects.toThrow(BinaryTooLargeError);
+    const result = (await byName('get_attachment').handler(client, {
+      attachmentId: 'IEAGIITRIMFWG6YH',
+      mode: 'download',
+    })) as Record<string, unknown>;
+
+    expect(client.getBinary as ReturnType<typeof vi.fn>).toHaveBeenCalledTimes(1);
+    expect(result).not.toHaveProperty('__mcpContent');
+    expect(result.url).toBe('https://mcp.example.com/wrike/attachments/IEAGIITRIMFWG6YH/file?token=abc');
+    expect(result.note as string).toMatch(/too large|over the.*inline limit/i);
   });
 
   it("get_attachment lets a non-size error from getBinary pass through unchanged for an image mode: 'download'", async () => {
