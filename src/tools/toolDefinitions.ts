@@ -72,9 +72,12 @@ function def<T extends AnySchema>(
 }
 
 /**
- * Ceiling on an attachment returned inline. Base64 inflates by ~33% and the
- * result is carried in the MCP response, so a large file would swamp the
- * client. Past this, list_attachments + withUrls hands back a 24h URL instead.
+ * Ceiling on the bytes fetched for an image attachment returned inline (an
+ * MCP image block, which carries the bytes as base64 and so inflates by
+ * ~33% again on top of this). This is purely an image transfer ceiling now:
+ * a non-image attachment never reaches it, since get_attachment's
+ * mode: 'download' returns a link for anything that isn't an accepted image
+ * without ever calling getBinary.
  */
 const MAX_INLINE_DOWNLOAD_BYTES = 5 * 1024 * 1024;
 
@@ -83,10 +86,59 @@ const MAX_INLINE_DOWNLOAD_BYTES = 5 * 1024 * 1024;
  * restriction — the protocol places no limit on `mimeType` — it reflects
  * what consuming models actually render. Anything outside this set (notably
  * `image/svg+xml`, which is XML/markup rather than raster pixels, and
- * `image/bmp`) falls back to the existing base64-in-JSON path instead of
- * risking a block the client rejects outright and hands nothing back for.
+ * `image/bmp`) falls back to a link instead of risking a block the client
+ * rejects outright and hands nothing back for.
  */
 const ACCEPTED_IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+
+/**
+ * Cleans a raw Content-Type value into a bare, comparable MIME type: strips
+ * any `; charset=...` (or other) parameters, trims whitespace, lowercases
+ * (media types are case-insensitive per RFC 9110 — 'Image/PNG' is as valid as
+ * 'image/png'), and normalises the widespread non-standard 'image/jpg'
+ * spelling to 'image/jpeg'. Wrike is not obliged to send a tidy value in
+ * either the attachment metadata or the download response, so both are run
+ * through this one helper before ever touching ACCEPTED_IMAGE_MIME_TYPES —
+ * this cleaning has already needed fixing twice (parameters, then case), and
+ * a second inline copy for the response value would just be a third place to
+ * fix it again.
+ */
+function cleanMimeType(raw: string | undefined): string {
+    let clean = (raw?.split(';')[0] ?? '').trim().toLowerCase();
+    if (clean === 'image/jpg') clean = 'image/jpeg';
+    return clean;
+}
+
+/**
+ * get_attachment's mode: 'download' note on a link result for an attachment
+ * this server did not inline (i.e. anything but an accepted image): base64
+ * file content has been removed entirely, so this is the only way to get
+ * the file now.
+ */
+const DOWNLOAD_NOT_INLINED_NOTE =
+    "File content is not returned as base64 any more — this link is how to fetch the file.";
+
+/**
+ * get_attachment's mode: 'download' note on a link result for an accepted
+ * image that was not inlined solely because it was too large — distinct from
+ * DOWNLOAD_NOT_INLINED_NOTE so the caller knows retrying won't help, only the
+ * link will.
+ */
+const DOWNLOAD_TOO_LARGE_NOTE =
+    `Image is over the ${MAX_INLINE_DOWNLOAD_BYTES / (1024 * 1024)}MB inline limit, so it was not ` +
+    "inlined — this link is how to fetch the file.";
+
+/**
+ * get_attachment's mode: 'download' note on a link result for an accepted
+ * image whose download response reported a different, non-image content type
+ * from the attachment's metadata. Distinct from the other two notes: this
+ * points at something genuinely odd about the attachment (stale or
+ * mislabelled metadata), not a routine size or type decision, so a reader
+ * can tell the cases apart.
+ */
+const DOWNLOAD_TYPE_MISMATCH_NOTE =
+    "File was not inlined because the download response reported a content type different from the " +
+    "attachment's metadata — this link is how to fetch the file.";
 
 /**
  * Default `pageSize` sent to GET /timelogs (and its folder/task-scoped
@@ -109,6 +161,85 @@ function query(params: Record<string, unknown>): Record<string, string | number 
         else out[k] = v as string | number | boolean;
     }
     return out;
+}
+
+/** Metadata fields GET /attachments/{id} returns that link resolution needs. */
+interface AttachmentLinkMeta {
+    type?: string;
+    taskId?: string;
+    folderId?: string;
+}
+
+/**
+ * Resolves the link get_attachment hands back for an attachment, given
+ * metadata already fetched from GET /attachments/{id} (so this never fetches
+ * it itself — callers with different reasons to have that metadata in hand
+ * already, e.g. mode: 'download' deciding image vs. link, pass it in rather
+ * than triggering a second, identical GET).
+ *
+ * A Wrike-hosted file (no `type`, or type: 'Wrike') gets this server's own
+ * signed link. Anything else is externally hosted (OneDrive, SharePoint,
+ * Google, Box, DropBox, DAM, Whiteboard, External) — GET /attachments/{id}
+ * does not support `withUrls`, so the only documented way to get a working
+ * link is the parent task's or folder's own attachment listing, which does.
+ *
+ * Shared by mode: 'url' and the non-image path of mode: 'download' so this
+ * resolution exists in exactly one place.
+ */
+async function resolveAttachmentLink(
+    c: WrikeClient,
+    attachmentId: string,
+    info: AttachmentLinkMeta | undefined
+): Promise<{ attachmentId: string; url: string; expiresAt?: string; type?: string; note?: string }> {
+    const type = info?.type;
+    if (!type || type === 'Wrike') {
+        const { url, expiresAt } = c.signedDownloadUrl(attachmentId);
+        return { attachmentId, url, expiresAt };
+    }
+    // taskId and folderId are documented as mutually exclusive on this object.
+    const parentId = info?.taskId ?? info?.folderId;
+    const parentType = info?.taskId ? 'tasks' : 'folders';
+    if (!parentId) {
+        // Nothing to query yet — this is not the same failure as an empty
+        // listing below, so it gets its own message: the caller may still
+        // know the parent even though the metadata didn't name one.
+        throw new Error(
+            `Attachment is hosted externally (type: '${type}') and its metadata names no ` +
+            `parent task or folder, so there is no attachment listing to resolve a URL ` +
+            `from. If you know the task or folder that holds it, try list_attachments ` +
+            `with withUrls: true on that directly.`
+        );
+    }
+    const listing = await c.get<Array<{ id?: string; url?: string }>>(
+        `/${parentType}/${parentId}/attachments`,
+        query({ withUrls: true })
+    );
+    const match = listing.data.find((a) => a.id === attachmentId);
+    if (!match?.url) {
+        // We already made the withUrls: true query that would have resolved
+        // this, and it came back empty — repeating it by hand just re-runs
+        // the call that already failed, so don't suggest that. Name the
+        // parent actually queried, for diagnosis.
+        throw new Error(
+            `Attachment is hosted externally (type: '${type}') and the ${parentType.slice(0, -1)} ` +
+            `${parentId}'s attachment listing (queried with withUrls: true) returned no URL ` +
+            `for it. Try opening the attachment in Wrike directly instead.`
+        );
+    }
+    return {
+        attachmentId,
+        url: match.url,
+        type,
+        // Not this server's signature, so no expiresAt: we have no expiry
+        // information for a provider-hosted link. The viewer needing
+        // separate access at that provider is expected — most callers have a
+        // Microsoft 365 connector that opens a SharePoint or OneDrive URL
+        // directly.
+        note:
+            `This link is hosted by ${type}, not minted by this server, and has no known ` +
+            `expiry. Opening it needs access at ${type} (a Microsoft 365 client or connector ` +
+            `can open a SharePoint or OneDrive link directly).`,
+    };
 }
 
 export function buildTools(): ToolDefinition[] {
@@ -399,19 +530,13 @@ export function buildTools(): ToolDefinition[] {
         ),
         def(
             'get_attachment',
-            "Get an attachment by ID. If a person wants the file, use mode: 'url' and hand them the " +
-            "link, even if they say 'download', 'get me', or 'save' it. A link is what a person opens. " +
-            "mode: 'url' returns this server's short-lived signed link for a Wrike-hosted file (needs " +
-            "PUBLIC_BASE_URL), or the provider's own URL (SharePoint, OneDrive, Google, Box, DropBox, " +
-            "etc.) for an externally hosted one. Costs one or two Wrike calls. Use mode: 'download' " +
-            "only when the calling program itself must operate on the bytes: hashing, parsing, " +
-            "inspecting content. It returns the file base64-encoded, roughly a third bigger than the " +
-            "original, which is expensive in context and easy to corrupt. An image attachment is the " +
-            "exception: it comes back as a viewable image, not base64. A sandboxed caller that must " +
-            "materialise the file itself should still try fetching the mode: 'url' link first: sandbox " +
-            "egress is usually allowlisted, not blocked. Fall back to mode: 'download' only if that " +
-            "fetch actually fails. mode: 'download' never works for an externally hosted attachment; " +
-            "use mode: 'url' for those. mode: 'metadata' (default) returns metadata only.",
+            "Get an attachment by ID. mode: 'metadata' (default) returns metadata only. mode: 'url' " +
+            "returns a link to the file — this server's short-lived signed link for a Wrike-hosted " +
+            "attachment, or the hosting provider's own URL for an externally hosted one — hand this to " +
+            "a person who wants the file, even if they say 'download', 'get me', or 'save' it. " +
+            "mode: 'download' returns an image (png/jpeg/gif/webp) inline as a viewable MCP image " +
+            "block, and returns that same link for anything else, including an externally hosted " +
+            "attachment.",
             S.GetAttachmentSchema,
             async (c, p) => {
                 const mode = p.mode ?? 'metadata';
@@ -427,65 +552,60 @@ export function buildTools(): ToolDefinition[] {
                     // Wrike-side access method except its own withUrls link. One
                     // metadata call tells us which case this is before deciding what
                     // to hand back.
-                    const meta = await c.get<Array<{ type?: string; taskId?: string; folderId?: string }>>(
-                        `/attachments/${p.attachmentId}`
-                    );
-                    const info = meta.data[0];
-                    const type = info?.type;
-                    if (!type || type === 'Wrike') {
-                        const { url, expiresAt } = c.signedDownloadUrl(p.attachmentId);
-                        return { attachmentId: p.attachmentId, url, expiresAt };
-                    }
-                    // Externally hosted: GET /attachments/{id} does not support
-                    // withUrls, so the only documented way to get a working link is
-                    // the parent's own attachment listing, which does. taskId and
-                    // folderId are documented as mutually exclusive on this object.
-                    const parentId = info?.taskId ?? info?.folderId;
-                    const parentType = info?.taskId ? 'tasks' : 'folders';
-                    if (!parentId) {
-                        // Nothing to query yet — this is not the same failure as an
-                        // empty listing below, so it gets its own message: the caller
-                        // may still know the parent even though the metadata didn't
-                        // name one.
-                        throw new Error(
-                            `Attachment is hosted externally (type: '${type}') and its metadata names no ` +
-                            `parent task or folder, so there is no attachment listing to resolve a URL ` +
-                            `from. If you know the task or folder that holds it, try list_attachments ` +
-                            `with withUrls: true on that directly.`
-                        );
-                    }
-                    const listing = await c.get<Array<{ id?: string; url?: string }>>(
-                        `/${parentType}/${parentId}/attachments`,
-                        query({ withUrls: true })
-                    );
-                    const match = listing.data.find((a) => a.id === p.attachmentId);
-                    if (!match?.url) {
-                        // We already made the withUrls: true query that would have
-                        // resolved this, and it came back empty — repeating it by hand
-                        // just re-runs the call that already failed, so don't suggest
-                        // that. Name the parent actually queried, for diagnosis.
-                        throw new Error(
-                            `Attachment is hosted externally (type: '${type}') and the ${parentType.slice(0, -1)} ` +
-                            `${parentId}'s attachment listing (queried with withUrls: true) returned no URL ` +
-                            `for it. Try opening the attachment in Wrike directly instead.`
-                        );
-                    }
-                    return {
-                        attachmentId: p.attachmentId,
-                        url: match.url,
-                        type,
-                        // Not this server's signature, so no expiresAt: we have no
-                        // expiry information for a provider-hosted link. The viewer
-                        // needing separate access at that provider is expected —
-                        // most callers have a Microsoft 365 connector that opens a
-                        // SharePoint or OneDrive URL directly.
-                        note:
-                            `This link is hosted by ${type}, not minted by this server, and has no known ` +
-                            `expiry. Opening it needs access at ${type} (a Microsoft 365 client or connector ` +
-                            `can open a SharePoint or OneDrive link directly).`,
-                    };
+                    const meta = await c.get<Array<AttachmentLinkMeta>>(`/attachments/${p.attachmentId}`);
+                    return resolveAttachmentLink(c, p.attachmentId, meta.data[0]);
                 }
-                // mode === 'download'. The byte budget is enforced inside
+                // mode === 'download'. Metadata is fetched first, before any
+                // bytes: GET /attachments/{id} carries both `contentType` and
+                // `type` (Wrike-hosted vs. externally hosted), which is exactly
+                // what deciding between an image block and a link needs, and
+                // fetching that first means a non-image attachment (a 700KB
+                // PDF, say) never has its body pulled down only to be thrown
+                // away for a link.
+                const meta = await c.get<Array<AttachmentLinkMeta & { contentType?: string; size?: number }>>(
+                    `/attachments/${p.attachmentId}`
+                );
+                const info = meta.data[0];
+                const isExternal = Boolean(info?.type && info.type !== 'Wrike');
+
+                // Builds the same link-plus-note shape from every non-inlined
+                // path below (non-image, externally hosted, or an oversized
+                // image caught before or after the fetch) so there is exactly
+                // one place that assembles it.
+                const toLinkResult = async (fallbackNote: string) => {
+                    const link = await resolveAttachmentLink(c, p.attachmentId, info);
+                    return { ...link, note: link.note ?? fallbackNote };
+                };
+
+                let cleanContentType = '';
+                if (!isExternal) {
+                    cleanContentType = cleanMimeType(info?.contentType);
+                }
+
+                if (isExternal || !ACCEPTED_IMAGE_MIME_TYPES.has(cleanContentType)) {
+                    // Externally hosted (do not fetch bytes at all: Wrike's
+                    // download endpoint only serves files it stores itself, so
+                    // this would just 400) or a non-image Wrike-hosted file
+                    // (nothing is inlined for it any more). Either way, this is
+                    // the same link mode: 'url' returns; the external-hosting
+                    // note it carries is preserved as-is, and a Wrike-hosted
+                    // link gets the not-inlined note added instead.
+                    return toLinkResult(DOWNLOAD_NOT_INLINED_NOTE);
+                }
+
+                // Pre-check on the metadata's declared size, before fetching
+                // any bytes: an accepted image already over the inline budget
+                // goes straight to the link, the same one the non-image path
+                // above returns, rather than pulling up to 5MB over the wire
+                // only to discard it. `size` is -1 for an externally hosted
+                // attachment, but that case was already routed to the link
+                // path above, so a real byte count is all that reaches here.
+                if (typeof info?.size === 'number' && info.size > MAX_INLINE_DOWNLOAD_BYTES) {
+                    return toLinkResult(DOWNLOAD_TOO_LARGE_NOTE);
+                }
+
+                // Accepted image: fetch the bytes and return an MCP image
+                // block, same as before. The byte budget is enforced inside
                 // getBinary (Content-Length check, then a streamed cutoff)
                 // rather than measured after the fact — a 100MB attachment
                 // must not be fully buffered before this limit has a chance
@@ -494,25 +614,31 @@ export function buildTools(): ToolDefinition[] {
                 try {
                     file = await c.getBinary(`/attachments/${p.attachmentId}/download`, {}, 0, MAX_INLINE_DOWNLOAD_BYTES);
                 } catch (err) {
+                    // Safety net: the pre-check above trusts Wrike's reported
+                    // metadata `size`, but getBinary enforces the real limit —
+                    // first from Content-Length, then by counting bytes as
+                    // they stream — which is the authority. If the two ever
+                    // disagree (stale or missing metadata size), still fall
+                    // back to the link rather than raising, for the same
+                    // reason the pre-check exists: mode: 'download' should
+                    // always return something usable.
                     if (err instanceof BinaryTooLargeError) {
-                        throw new Error(
-                            `Attachment is over the ${MAX_INLINE_DOWNLOAD_BYTES}-byte inline limit. ` +
-                            `Use mode: 'url' to get a short-lived download link instead.`
-                        );
+                        return toLinkResult(DOWNLOAD_TOO_LARGE_NOTE);
                     }
-                    // Wrike refuses this exact download for an externally hosted
-                    // attachment (OneDrive, SharePoint, Google, Box, DropBox) — its
-                    // download endpoint only serves files it stores itself. Anything
-                    // else from getBinary (network, auth, other 4xx/5xx) passes through
-                    // unchanged.
+                    // Safety net only: the isExternal check above should already
+                    // have routed an externally hosted attachment to the link
+                    // path before this is reached. Kept in case metadata ever
+                    // lacks `type` for an external image, since Wrike still
+                    // refuses this exact download in that case.
                     //
-                    // This deliberately keys on a fragment of Wrike's own error text,
-                    // which is undocumented and could be reworded without notice. If it
-                    // is, this match just stops firing and the caller sees Wrike's raw
-                    // message instead of the guidance below — an acceptable, silent
-                    // degradation back to the status quo. The alternative, treating
-                    // every 400 from this endpoint as "externally hosted", was rejected:
-                    // it would mislabel unrelated 400s (a bad ID, a permissions error)
+                    // This deliberately keys on a fragment of Wrike's own error
+                    // text, which is undocumented and could be reworded without
+                    // notice. If it is, this match just stops firing and the
+                    // caller sees Wrike's raw message instead of the guidance
+                    // below — an acceptable, silent degradation back to the
+                    // status quo. The alternative, treating every 400 from this
+                    // endpoint as "externally hosted", was rejected: it would
+                    // mislabel unrelated 400s (a bad ID, a permissions error)
                     // with advice that does not apply to them.
                     if (
                         err instanceof WrikeApiError &&
@@ -527,51 +653,54 @@ export function buildTools(): ToolDefinition[] {
                     }
                     throw err;
                 }
-                // Wrike sends content types with parameters attached (an observed
-                // real value: 'image/png;charset=UTF-8') and media types are
-                // case-insensitive per RFC 9110 ('Image/PNG' is as valid as
-                // 'image/png') — an assumption live traffic is not obliged to
-                // honour either way. The MCP image block needs a clean, lowercase
-                // media type, and the allowlist check below must run against that
-                // same cleaned value or it would miss both cases.
-                let cleanContentType = (file.contentType.split(';')[0] ?? '').trim().toLowerCase();
-                // 'image/jpg' is a widespread non-standard spelling of
-                // 'image/jpeg' and a plausible stored value; normalise it before
-                // the allowlist check so it isn't rejected on a spelling
-                // technicality, and emit the correct mimeType either way.
-                if (cleanContentType === 'image/jpg') cleanContentType = 'image/jpeg';
-                if (ACCEPTED_IMAGE_MIME_TYPES.has(cleanContentType)) {
-                    // Base64 is not repeated in the text block: that would put the
-                    // context cost this exists to avoid right back in, next to the
-                    // image block that already carries the same bytes.
-                    const metaLines = [
-                        `attachmentId: ${p.attachmentId}`,
-                        ...(file.filename ? [`filename: ${file.filename}`] : []),
-                        `size: ${file.data.byteLength} bytes`,
-                        `contentType: ${cleanContentType}`,
-                    ];
-                    const imageResult: McpContentResult = {
-                        __mcpContent: [
-                            { type: 'image', data: file.data.toString('base64'), mimeType: cleanContentType },
-                            { type: 'text', text: metaLines.join('\n') },
-                        ],
-                    };
-                    return imageResult;
+
+                // The metadata's contentType decided we'd get this far, but it's
+                // only a prediction; the download response's own Content-Type,
+                // now that bytes are actually in hand, describes what was truly
+                // sent and is the more authoritative of the two when it has an
+                // opinion worth trusting. Re-run the same allowlist against it,
+                // cleaned through the same helper, with three possible outcomes:
+                //
+                //   1. It cleans to an accepted image: emit the image block
+                //      using THIS value as mimeType, not the metadata's, since
+                //      it describes the actual bytes.
+                //   2. It's absent, empty, or 'application/octet-stream': Wrike's
+                //      download endpoint (and getBinary itself, which substitutes
+                //      this exact string when the header is missing) is not
+                //      obliged to send a meaningful type, so this carries no
+                //      real opinion. Keep trusting the metadata-derived decision
+                //      already made rather than downgrading a perfectly good
+                //      image to a link over a generic non-answer.
+                //   3. It's present, meaningful, and NOT an accepted image (e.g.
+                //      'application/pdf'): a genuine disagreement between
+                //      metadata and reality. Don't emit an image block — fall
+                //      back to the link with a note that calls out the mismatch
+                //      specifically, distinct from the routine not-inlined and
+                //      too-large cases.
+                const responseContentType = cleanMimeType(file.contentType);
+                const responseHasOpinion =
+                    responseContentType !== '' && responseContentType !== 'application/octet-stream';
+                if (responseHasOpinion && !ACCEPTED_IMAGE_MIME_TYPES.has(responseContentType)) {
+                    return toLinkResult(DOWNLOAD_TYPE_MISMATCH_NOTE);
                 }
-                return {
-                    attachmentId: p.attachmentId,
-                    contentType: file.contentType,
-                    ...(file.filename ? { filename: file.filename } : {}),
-                    size: file.data.byteLength,
-                    encoding: 'base64',
-                    content: file.data.toString('base64'),
-                    note:
-                        "This is base64 content for programmatic use. If a person needs the file, call " +
-                        "get_attachment again with mode: 'url' and hand them that link instead — " +
-                        "reproducing base64 to a person is unreliable at this length and a corrupted " +
-                        "copy fails silently. Decoding it yourself to a file is fine; verify the result " +
-                        "by checking the decoded byte count against size.",
+                const emittedContentType = responseHasOpinion ? responseContentType : cleanContentType;
+
+                // Base64 is not repeated in the text block: that would put the
+                // context cost this exists to avoid right back in, next to the
+                // image block that already carries the same bytes.
+                const metaLines = [
+                    `attachmentId: ${p.attachmentId}`,
+                    ...(file.filename ? [`filename: ${file.filename}`] : []),
+                    `size: ${file.data.byteLength} bytes`,
+                    `contentType: ${emittedContentType}`,
+                ];
+                const imageResult: McpContentResult = {
+                    __mcpContent: [
+                        { type: 'image', data: file.data.toString('base64'), mimeType: emittedContentType },
+                        { type: 'text', text: metaLines.join('\n') },
+                    ],
                 };
+                return imageResult;
             }
         ),
         def('delete_attachment', 'Delete an attachment.', S.DeleteAttachmentSchema, (c, p) =>

@@ -56,16 +56,16 @@ describe('createMcpServer tool result wrapping', () => {
   });
 
   it('does not mistake a result that legitimately has its own "content" field for the marker', async () => {
-    // Shape of the non-image get_attachment download result: a real `content`
-    // field holding base64, no `__mcpContent`. Keying detection on `content`
-    // would misread this as content blocks; it must still be stringified.
+    // A tool result can legitimately have its own `content` field, no
+    // `__mcpContent`. Keying detection on `content` would misread this as
+    // content blocks; it must still be stringified.
     const value = {
       attachmentId: 'A1',
       contentType: 'application/pdf',
       size: 3,
       encoding: 'base64',
       content: 'QUJD',
-      note: 'do not relay this to a person',
+      note: 'not a real get_attachment result any more, just a shape check',
     };
     const registry = registryOf([makeTool('t', async () => value)]);
     const result = await captureCallbacks(registry, client).get('t')!({});

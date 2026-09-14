@@ -518,17 +518,13 @@ export const GetAttachmentSchema = z
      * What to return. Defaults to `'metadata'` when omitted.
      *
      * - `'metadata'` — attachment metadata only, no file bytes.
-     * - `'url'` — a short-lived, single-attachment signed URL on this
-     *   server; a browser opening it downloads the file directly. This is
-     *   the mode to use to hand a file to a *person*. Requires this
-     *   server's `PUBLIC_BASE_URL` to be configured; makes no Wrike API call.
-     * - `'download'` — the file content itself, base64-encoded, inside the
-     *   tool result (uses `GET /attachments/{id}/download`, the only Wrike
-     *   endpoint that yields bytes). **Never use this to relay a file to a
-     *   person in a chat reply** — an LLM cannot reproduce a long base64
-     *   string verbatim, and a corrupted reproduction is a silent, not a
-     *   loud, failure. Only use it when a program will consume `content`
-     *   directly.
+     * - `'url'` — a link to the file: this server's short-lived signed URL
+     *   for a Wrike-hosted attachment (requires `PUBLIC_BASE_URL`), or the
+     *   hosting provider's own URL for an externally hosted one. This is
+     *   the mode to use to hand a file to a *person*.
+     * - `'download'` — an accepted image type (png/jpeg/gif/webp) comes
+     *   back as an inline MCP image block; anything else returns the same
+     *   link `'url'` does. No base64 file content is ever returned.
      */
     mode: z.enum(['metadata', 'download', 'url']).optional(),
     /** Include previous versions in the metadata response. */

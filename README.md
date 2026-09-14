@@ -36,7 +36,7 @@ OAuth app credentials           logs in with THEIR Wrike acct       (Wrike, not 
 | Timelogs | `create_timelog`, `list_timelogs`, `update_timelog`, `delete_timelog` |
 | Attachments | `create_attachment`, `list_attachments`, `get_attachment`, `delete_attachment` |
 
-`get_attachment` takes a `mode`: `'metadata'` (default, no file bytes), `'url'` (a short-lived signed link on this server for a **person** to open in a browser — requires `PUBLIC_BASE_URL`), or `'download'` (base64 file content inline, for a **program** to consume — never use it to relay a file to someone in a chat reply, since an LLM cannot reproduce a long base64 string verbatim).
+`get_attachment` takes a `mode`: `'metadata'` (default, no file bytes), `'url'` (a short-lived signed link on this server for a **person** to open in a browser — requires `PUBLIC_BASE_URL`), or `'download'` (an inline MCP image block for an accepted image within the size limit, and that same link for anything else — no base64 file content is returned any more).
 
 **Full object support**: `create_task`/`update_task` accept the complete Wrike task object — `dates` (`type`, `start`, `due`, `duration`, `workOnWeekends`), `effortAllocation` (`mode`, `totalEffort`, `allocatedEffort`, `dailyAllocationPercentage`, `responsibleAllocation[]`), custom fields, metadata, responsibles, followers, superTasks, priority, billing type, custom statuses. Schemas mirror the official OpenAPI definitions at developers.wrike.com.
 
