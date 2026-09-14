@@ -91,13 +91,21 @@ export class SessionManager {
         console.warn(
           `[mcp] rejected unknown mcp-session-id (prefix ${sessionId.slice(0, 8)}...); client is expected to reinitialize`
         );
+        // JSON-RPC 2.0 requires the error's id to match the request's, so a
+        // client dispatching by id can correlate this response. Fall back to
+        // null only when there genuinely is none: no body (GET/DELETE), a
+        // batch (array), a notification (no id), or an id of an illegal type
+        // (must be a string or number).
+        const body: unknown = req.body;
+        const rawId = body && typeof body === 'object' && !Array.isArray(body) ? (body as { id?: unknown }).id : undefined;
+        const requestId = typeof rawId === 'string' || typeof rawId === 'number' ? rawId : null;
         res.status(404).json({
           jsonrpc: '2.0',
           error: {
             code: -32001,
             message: 'Session not found or expired. Reinitialize the connection with a new InitializeRequest.',
           },
-          id: null,
+          id: requestId,
         });
         return;
       }

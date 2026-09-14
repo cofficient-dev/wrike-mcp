@@ -132,7 +132,7 @@ describe('mcp session recovery after a restart (unknown mcp-session-id)', () => 
   // HTTP 404 so the client's spec-mandated recovery (reinitialize) actually
   // fires, rather than silently starting a new, uninitialized session.
 
-  it('returns 404 with a JSON-RPC error body for an unknown mcp-session-id, and does not create a session', async () => {
+  it('returns 404 with a JSON-RPC error body echoing the request id, and does not create a session', async () => {
     const { app } = makeApp(patConfig());
     const res = await request(app)
       .post('/mcp')
@@ -147,10 +147,32 @@ describe('mcp session recovery after a restart (unknown mcp-session-id)', () => 
         code: -32001,
         message: 'Session not found or expired. Reinitialize the connection with a new InitializeRequest.',
       },
-      id: null,
+      // The request carried id: 9, so a client dispatching responses by id
+      // must get that same id back, not null.
+      id: 9,
     });
     // No new session was minted for the unknown id.
     expect(res.headers['mcp-session-id']).toBeUndefined();
+  });
+
+  it('falls back to id: null when the request has no id to echo (GET with no body)', async () => {
+    const { app } = makeApp(patConfig());
+    const res = await request(app)
+      .get('/mcp')
+      .set('mcp-session-id', 'no-such-session-id')
+      .set('Accept', 'text/event-stream');
+
+    expect(res.status).toBe(404);
+    // The field must still be present, since JSON-RPC requires an id key on
+    // every response, even when there was no request id to echo.
+    expect(res.body).toEqual({
+      jsonrpc: '2.0',
+      error: {
+        code: -32001,
+        message: 'Session not found or expired. Reinitialize the connection with a new InitializeRequest.',
+      },
+      id: null,
+    });
   });
 
   it('still 404s an initialize request that carries a stale mcp-session-id (not special-cased)', async () => {
