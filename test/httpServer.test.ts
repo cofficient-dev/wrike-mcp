@@ -126,6 +126,66 @@ describe('mcp endpoint auth', () => {
   });
 });
 
+describe('mcp session recovery after a restart (unknown mcp-session-id)', () => {
+  // A restart discards the in-memory session map. The client's next request
+  // still carries its old mcp-session-id, and the server must answer with
+  // HTTP 404 so the client's spec-mandated recovery (reinitialize) actually
+  // fires, rather than silently starting a new, uninitialized session.
+
+  it('returns 404 with a JSON-RPC error body for an unknown mcp-session-id, and does not create a session', async () => {
+    const { app } = makeApp(patConfig());
+    const res = await request(app)
+      .post('/mcp')
+      .set('mcp-session-id', 'no-such-session-id')
+      .set('Accept', 'application/json, text/event-stream')
+      .send({ jsonrpc: '2.0', id: 9, method: 'tools/call', params: { name: 'create_task' } });
+
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({
+      jsonrpc: '2.0',
+      error: {
+        code: -32001,
+        message: 'Session not found or expired. Reinitialize the connection with a new InitializeRequest.',
+      },
+      id: null,
+    });
+    // No new session was minted for the unknown id.
+    expect(res.headers['mcp-session-id']).toBeUndefined();
+  });
+
+  it('still creates a session and returns mcp-session-id when no header is sent at all (unchanged)', async () => {
+    const { app } = makeApp(patConfig());
+    const res = await request(app)
+      .post('/mcp')
+      .set('Accept', 'application/json, text/event-stream')
+      .send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 't', version: '0' } } });
+
+    expect(res.status).toBe(200);
+    expect(res.headers['mcp-session-id']).toBeTruthy();
+  });
+
+  it('still routes to the existing session for a known mcp-session-id (unchanged)', async () => {
+    const { app } = makeApp(patConfig());
+    const init = await request(app)
+      .post('/mcp')
+      .set('Accept', 'application/json, text/event-stream')
+      .send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 't', version: '0' } } });
+    const sessionId = init.headers['mcp-session-id'] as string;
+    expect(sessionId).toBeTruthy();
+
+    const tools = await request(app)
+      .post('/mcp')
+      .set('mcp-session-id', sessionId)
+      .set('Accept', 'application/json, text/event-stream')
+      .send({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
+
+    expect(tools.status).toBe(200);
+    expect(tools.text).toContain('create_task');
+    // The existing session is reused, not replaced.
+    expect(tools.headers['mcp-session-id']).toBe(sessionId);
+  });
+});
+
 describe('connect flow (per-user)', () => {
   it('GET /connect redirects to Wrike with a state bound to the handle', async () => {
     const { app } = makeApp(oauthConfig());
