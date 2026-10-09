@@ -741,8 +741,8 @@ describe('MCP OAuth hardening', () => {
 describe('trust proxy at app level', () => {
     // POST /oauth/register is limited to 10/min per req.ip. Eleven requests that each
     // claim a different X-Forwarded-For land in one bucket only if the header is ignored.
-    async function registerWithSpoofedIps(trustProxy: string | false) {
-        const { app } = makeApp({ ...oauthConfig('https://mcp.example.com/wrike'), trustProxy });
+    async function registerWithSpoofedIps(overrides: Partial<AppConfig> = {}) {
+        const { app } = makeApp({ ...oauthConfig('https://mcp.example.com/wrike'), ...overrides });
         const statuses: number[] = [];
         for (let i = 0; i < 11; i++) {
             const res = await request(app)
@@ -754,11 +754,16 @@ describe('trust proxy at app level', () => {
         return statuses;
     }
 
-    it("ignores X-Forwarded-For with TRUST_PROXY=none (false)", async () => {
-        expect((await registerWithSpoofedIps(false)).at(-1)).toBe(429);
+    it('ignores X-Forwarded-For with TRUST_PROXY=none (false)', async () => {
+        const statuses = await registerWithSpoofedIps({ trustProxy: false });
+        // First ten succeed, the eleventh overflows the one shared bucket: proves the header was ignored,
+        // not that registration is always limited.
+        expect(statuses.slice(0, 10).every((s) => s === 201)).toBe(true);
+        expect(statuses[10]).toBe(429);
     });
 
-    it('honours X-Forwarded-For from a trusted loopback proxy with the default value', async () => {
-        expect(await registerWithSpoofedIps('loopback, uniquelocal')).not.toContain(429);
+    it('honours X-Forwarded-For from a trusted loopback proxy when trustProxy is unset', async () => {
+        // No override: pins the app's real default rather than a copy of it.
+        expect(await registerWithSpoofedIps()).not.toContain(429);
     });
 });
