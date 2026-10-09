@@ -764,6 +764,7 @@ describe('trust proxy at app level', () => {
 
     it('honours X-Forwarded-For from a trusted loopback proxy when trustProxy is unset', async () => {
         // No override: pins the app's real default rather than a copy of it.
-        expect(await registerWithSpoofedIps()).not.toContain(429);
+        // Every spoofed IP gets its own bucket and every registration succeeds.
+        expect(await registerWithSpoofedIps()).toEqual(Array(11).fill(201));
     });
 });
