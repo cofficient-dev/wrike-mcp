@@ -737,3 +737,28 @@ describe('MCP OAuth hardening', () => {
         expect(wrongCookie.status).toBe(400);
     });
 });
+
+describe('trust proxy at app level', () => {
+    // POST /oauth/register is limited to 10/min per req.ip. Eleven requests that each
+    // claim a different X-Forwarded-For land in one bucket only if the header is ignored.
+    async function registerWithSpoofedIps(trustProxy: string | false) {
+        const { app } = makeApp({ ...oauthConfig('https://mcp.example.com/wrike'), trustProxy });
+        const statuses: number[] = [];
+        for (let i = 0; i < 11; i++) {
+            const res = await request(app)
+                .post('/oauth/register')
+                .set('X-Forwarded-For', `203.0.113.${i + 1}`)
+                .send({ redirect_uris: ['https://claude.ai/callback'] });
+            statuses.push(res.status);
+        }
+        return statuses;
+    }
+
+    it("ignores X-Forwarded-For with TRUST_PROXY=none (false)", async () => {
+        expect((await registerWithSpoofedIps(false)).at(-1)).toBe(429);
+    });
+
+    it('honours X-Forwarded-For from a trusted loopback proxy with the default value', async () => {
+        expect(await registerWithSpoofedIps('loopback, uniquelocal')).not.toContain(429);
+    });
+});

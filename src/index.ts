@@ -12,6 +12,14 @@ import { SessionManager } from './transport.js';
 
 async function main(): Promise<void> {
   const config = loadConfig();
+  // The default trusts any private-network peer to set X-Forwarded-For; on a shared
+  // network that makes the per-IP rate limiter spoofable. Say so at startup.
+  if (process.env.TRUST_PROXY === undefined) {
+    console.warn(
+      "TRUST_PROXY not set: trusting X-Forwarded-For from any loopback/private-network peer. " +
+        "Set it to the reverse proxy's IP (e.g. 172.18.0.5/32), or 'none' with no proxy, if other hosts can reach this port."
+    );
+  }
   const store = new EncryptedTokenStore(config.tokenEncryptionKey, config.tokenStorePath);
   const authManager = new AuthManager(config.auth, store);
 

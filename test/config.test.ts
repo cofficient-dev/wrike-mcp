@@ -62,6 +62,9 @@ describe('TRUST_PROXY', () => {
     });
     it("maps 'none' to false (trust no proxy)", () => {
         expect(loadConfig({ ...base, TRUST_PROXY: 'none' }).trustProxy).toBe(false);
+        // Operator-typed value: case and surrounding whitespace are ignored on purpose.
+        expect(loadConfig({ ...base, TRUST_PROXY: 'NONE' }).trustProxy).toBe(false);
+        expect(loadConfig({ ...base, TRUST_PROXY: ' none ' }).trustProxy).toBe(false);
     });
     it('accepts an IP/CIDR', () => {
         expect(loadConfig({ ...base, TRUST_PROXY: '172.18.0.5/32' }).trustProxy).toBe('172.18.0.5/32');
