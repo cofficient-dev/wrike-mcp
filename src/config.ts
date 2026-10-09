@@ -27,6 +27,7 @@ const envSchema = z.object({
     PUBLIC_BASE_URL: z.string().url().optional(),
     MCP_REDIRECT_URI_ALLOWLIST: z.string().optional(),
     MCP_ALLOW_LOOPBACK_REDIRECTS: z.enum(['true', 'false']).default('true'),
+    TRUST_PROXY: z.string().min(1).default('loopback, uniquelocal'),
 });
 
 export interface PatConfig {
@@ -57,6 +58,8 @@ export interface AppConfig {
     redirectUriAllowlist?: string[];
     /** Also accept http://localhost / 127.0.0.1 / [::1] on any port at DCR; defaults to true. */
     allowLoopbackRedirects?: boolean;
+    /** Express `trust proxy` value (address, subnet or keyword list); defaults to 'loopback, uniquelocal'. */
+    trustProxy?: string;
 }
 
 export class ConfigError extends Error { }
@@ -106,5 +109,6 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
             ? e.MCP_REDIRECT_URI_ALLOWLIST.split(',').map((s) => s.trim()).filter(Boolean)
             : DEFAULT_REDIRECT_ALLOWLIST,
         allowLoopbackRedirects: e.MCP_ALLOW_LOOPBACK_REDIRECTS === 'true',
+        trustProxy: e.TRUST_PROXY,
     };
 }

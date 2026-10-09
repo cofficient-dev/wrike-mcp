@@ -109,8 +109,10 @@ export function createHttpApp({
     const flowCookie = cookieSecure ? `__Host-${FLOW_COOKIE_BASE}` : FLOW_COOKIE_BASE;
 
     // Behind Caddy on the private Docker network: trust it for req.ip, or every
-    // caller shares the proxy's address and one rate-limit bucket.
-    app.set('trust proxy', 'loopback, uniquelocal');
+    // caller shares the proxy's address and one rate-limit bucket. The default
+    // trusts any private-network peer to set X-Forwarded-For; set TRUST_PROXY to
+    // the proxy's address when other hosts can reach the app port directly.
+    app.set('trust proxy', config.trustProxy ?? 'loopback, uniquelocal');
     app.disable('x-powered-by');
 
     const hits = new Map<string, { count: number; reset: number }>();

@@ -154,8 +154,14 @@ export class McpOAuthServer {
     private redirectUriAllowed(uri: string): boolean {
         if (this.redirectPolicy.allowlist.includes(uri)) return true;
         if (!this.redirectPolicy.allowLoopback) return false;
-        const u = new URL(uri);
-        return u.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(u.hostname);
+        // registerClient filters to parseable URLs first; the catch keeps an unparseable
+        // value a 400 (not allowed) rather than a 500 if a caller ever skips that.
+        try {
+            const u = new URL(uri);
+            return u.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(u.hostname);
+        } catch {
+            return false;
+        }
     }
 
     private sign(payload: string): string {
