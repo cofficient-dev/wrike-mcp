@@ -1,3 +1,4 @@
+import express from 'express';
 import { z } from 'zod';
 
 const hex64 = z.string().regex(/^[0-9a-fA-F]{64}$/, 'must be 64 hex characters (32 bytes)');
@@ -58,8 +59,8 @@ export interface AppConfig {
     redirectUriAllowlist?: string[];
     /** Also accept http://localhost / 127.0.0.1 / [::1] on any port at DCR; defaults to true. */
     allowLoopbackRedirects?: boolean;
-    /** Express `trust proxy` value (address, subnet or keyword list); defaults to 'loopback, uniquelocal'. */
-    trustProxy?: string;
+    /** Express `trust proxy`: IPs/CIDRs or proxy-addr keywords (loopback, linklocal, uniquelocal); false = trust none. Defaults to 'loopback, uniquelocal'. */
+    trustProxy?: string | false;
 }
 
 export class ConfigError extends Error { }
@@ -98,6 +99,20 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
         );
     }
 
+    // 'none' disables proxy trust (direct exposure). Anything else must be IPs/CIDRs or
+    // proxy-addr keywords; hostnames are not resolved. Compile it now so a bad value fails
+    // at startup with a clear message instead of a cryptic error when the app is built.
+    const trustProxy: string | false = e.TRUST_PROXY.trim().toLowerCase() === 'none' ? false : e.TRUST_PROXY;
+    if (trustProxy !== false) {
+        try {
+            express().set('trust proxy', trustProxy);
+        } catch {
+            throw new ConfigError(
+                `Invalid configuration: TRUST_PROXY must be 'none' or comma-separated IPs/CIDRs or loopback/linklocal/uniquelocal (hostnames are not resolved); got ${JSON.stringify(e.TRUST_PROXY)}`
+            );
+        }
+    }
+
     return {
         port: e.PORT,
         host: e.HOST,
@@ -109,6 +124,6 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
             ? e.MCP_REDIRECT_URI_ALLOWLIST.split(',').map((s) => s.trim()).filter(Boolean)
             : DEFAULT_REDIRECT_ALLOWLIST,
         allowLoopbackRedirects: e.MCP_ALLOW_LOOPBACK_REDIRECTS === 'true',
-        trustProxy: e.TRUST_PROXY,
+        trustProxy,
     };
 }

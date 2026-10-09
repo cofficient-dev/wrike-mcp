@@ -55,3 +55,18 @@ describe('loadConfig', () => {
         expect(cfg.auth.mode).toBe('pat');
     });
 });
+describe('TRUST_PROXY', () => {
+    const base = { TOKEN_ENCRYPTION_KEY: KEY, WRIKE_PAT: 't' };
+    it('defaults to loopback + private networks', () => {
+        expect(loadConfig(base).trustProxy).toBe('loopback, uniquelocal');
+    });
+    it("maps 'none' to false (trust no proxy)", () => {
+        expect(loadConfig({ ...base, TRUST_PROXY: 'none' }).trustProxy).toBe(false);
+    });
+    it('accepts an IP/CIDR', () => {
+        expect(loadConfig({ ...base, TRUST_PROXY: '172.18.0.5/32' }).trustProxy).toBe('172.18.0.5/32');
+    });
+    it('rejects a hostname at load time with a clear error', () => {
+        expect(() => loadConfig({ ...base, TRUST_PROXY: 'caddy' })).toThrow(/TRUST_PROXY must be/);
+    });
+});

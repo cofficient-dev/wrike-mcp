@@ -470,7 +470,8 @@ export function createHttpApp({
                 );
                 return;
             }
-            res.clearCookie(consentCookie, { path: '/' });
+            // Secure must match the set: browsers ignore a __Host- Set-Cookie without it.
+            res.clearCookie(consentCookie, { path: '/', secure: cookieSecure });
             if (!resume || !mcpOauth?.describePending(resume)) {
                 res.status(400).type('html').send(
                     page('Link expired', '<p>This sign-in link has expired. Start again from your MCP client.</p>')
@@ -492,7 +493,7 @@ export function createHttpApp({
             }
             const verified = state ? oauthState.verify(state) : { valid: false as const };
             const flow = readCookie(req, flowCookie);
-            res.clearCookie(flowCookie, { path: '/' });
+            res.clearCookie(flowCookie, { path: '/', secure: cookieSecure });
             if (!code || !verified.valid) {
                 res.status(400).send('Invalid or expired state parameter. Restart at /connect.');
                 return;
