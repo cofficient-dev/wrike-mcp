@@ -276,7 +276,10 @@ describe('connect flow (per-user)', () => {
     const connectRes = await request(app).get('/connect?user=alice');
     const state = new URL(connectRes.headers.location as string).searchParams.get('state')!;
 
-    const res = await request(app).get(`/oauth/callback?code=the-code&state=${encodeURIComponent(state)}`);
+    // The browser that went to Wrike carries the flow cookie back to the callback.
+    const res = await request(app)
+      .get(`/oauth/callback?code=the-code&state=${encodeURIComponent(state)}`)
+      .set('Cookie', connectRes.headers['set-cookie'] as unknown as string[]);
     expect(res.status).toBe(200);
     expect(res.text).toContain('wmc_');
     expect(res.text).toContain('alice');

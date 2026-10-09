@@ -5,9 +5,19 @@ import { randomUUID } from 'node:crypto';
 
 export interface UserSession {
   sessionId: string;
+  userId: string;
   server: McpServer;
   transport: StreamableHTTPServerTransport;
+  lastUsed: number;
 }
+
+/** Sessions idle this long are closed; clients get 404 and reinitialise. */
+export const SESSION_IDLE_MS = 30 * 60 * 1000;
+/**
+ * ponytail: per-user cap; the oldest session is closed to make room. Raise it
+ * if users legitimately run more concurrent clients than this.
+ */
+export const MAX_SESSIONS_PER_USER = 20;
 
 /**
  * Manages per-user MCP sessions.
@@ -21,8 +31,29 @@ export class SessionManager {
 
   constructor(
     /** Creates a fresh McpServer bound to the given user's credentials. */
-    private readonly createServerForUser: (userId: string) => McpServer
-  ) {}
+    private readonly createServerForUser: (userId: string) => McpServer,
+    private readonly now: () => number = Date.now
+  ) {
+    // Sessions only end on an explicit DELETE otherwise, so crashed or
+    // abandoned clients would hold a full McpServer each until restart.
+    setInterval(() => this.sweep(), 5 * 60 * 1000).unref();
+  }
+
+  /** Closes sessions idle longer than SESSION_IDLE_MS. */
+  sweep(): void {
+    const cutoff = this.now() - SESSION_IDLE_MS;
+    for (const s of [...this.sessions.values()]) if (s.lastUsed < cutoff) this.close(s);
+  }
+
+  private close(s: UserSession): void {
+    this.sessions.delete(s.sessionId);
+    void s.transport.close();
+  }
+
+  /** Number of open sessions (for tests and diagnostics). */
+  get size(): number {
+    return this.sessions.size;
+  }
 
   /** Returns the existing session for a client-supplied id, if any. */
   get(sessionId: string | undefined): UserSession | undefined {
@@ -31,6 +62,10 @@ export class SessionManager {
 
   /** Creates a new session bound to a user. */
   async create(userId: string): Promise<UserSession> {
+    const mine = [...this.sessions.values()].filter((s) => s.userId === userId);
+    if (mine.length >= MAX_SESSIONS_PER_USER) {
+      this.close(mine.reduce((a, b) => (a.lastUsed <= b.lastUsed ? a : b)));
+    }
     const sessionId = randomUUID();
     const server = this.createServerForUser(userId);
     const transport = new StreamableHTTPServerTransport({
@@ -41,7 +76,7 @@ export class SessionManager {
       this.sessions.delete(sessionId);
     };
     await server.connect(transport);
-    const session: UserSession = { sessionId, server, transport };
+    const session: UserSession = { sessionId, userId, server, transport, lastUsed: this.now() };
     this.sessions.set(sessionId, session);
     return session;
   }
@@ -119,6 +154,7 @@ export class SessionManager {
       session = await this.create(userId);
       res.setHeader('mcp-session-id', session.sessionId);
     }
+    session.lastUsed = this.now();
     await session.transport.handleRequest(req, res, req.body);
   }
 

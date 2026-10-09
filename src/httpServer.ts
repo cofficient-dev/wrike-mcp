@@ -5,7 +5,7 @@ import { AuthManager } from './auth/authManager.js';
 import { OAuthStateManager, WRIKE_AUTHORIZE_URL, exchangeCodeForTokens, toStoredTokens } from './auth/oauth.js';
 import { McpOAuthServer, McpOauthError } from './auth/mcpOauth.js';
 import type { AttachmentLinks } from './auth/attachmentLinks.js';
-import { type AppConfig } from './config.js';
+import { DEFAULT_REDIRECT_ALLOWLIST, type AppConfig } from './config.js';
 import { redact, errorMessage, registerSecret } from './redact.js';
 import type { SessionManager } from './transport.js';
 import { WrikeIdSchema } from './tools/schemas.js';
@@ -53,6 +53,15 @@ import { WrikeClient } from './wrikeClient.js';
  */
 const CONSENT_COOKIE_BASE = 'wrike_mcp_consent';
 
+/**
+ * Cookie carrying the nonce of the `state` sent to Wrike. The callback only
+ * accepts a state whose nonce matches the cookie, i.e. the browser that went
+ * to Wrike is the one coming back. Without this, an attacker could pass the
+ * consent screen in their own browser, send a victim the resulting Wrike
+ * link, and have the victim's Wrike tokens land behind the attacker's client.
+ */
+const FLOW_COOKIE_BASE = 'wrike_mcp_flow';
+
 // The attachment id in this route is validated with the same `WrikeIdSchema`
 // the tools use (see `src/tools/schemas.ts`), so there is nothing here to
 // keep in sync.
@@ -86,7 +95,10 @@ export function createHttpApp({
     // MCP-native OAuth authorization server (only in oauth mode with PUBLIC_BASE_URL set).
     const mcpOauth =
         config.auth.mode === 'oauth' && config.publicBaseUrl
-            ? new McpOAuthServer(config.auth, authManager, publicBaseUrl)
+            ? new McpOAuthServer(config.auth, authManager, publicBaseUrl, {
+                  allowlist: config.redirectUriAllowlist ?? DEFAULT_REDIRECT_ALLOWLIST,
+                  allowLoopback: config.allowLoopbackRedirects ?? true,
+              })
             : undefined;
     // (publicBaseUrl declared above)
 
@@ -94,8 +106,22 @@ export function createHttpApp({
     // HTTPS; over plain HTTP the browser would reject the cookie outright.
     const cookieSecure = publicBaseUrl.startsWith('https://');
     const consentCookie = cookieSecure ? `__Host-${CONSENT_COOKIE_BASE}` : CONSENT_COOKIE_BASE;
+    const flowCookie = cookieSecure ? `__Host-${FLOW_COOKIE_BASE}` : FLOW_COOKIE_BASE;
+
+    // Behind Caddy on the private Docker network: trust it for req.ip, or every
+    // caller shares the proxy's address and one rate-limit bucket. The default
+    // trusts any private-network peer to set X-Forwarded-For; set TRUST_PROXY to
+    // the proxy's address when other hosts can reach the app port directly.
+    app.set('trust proxy', config.trustProxy ?? 'loopback, uniquelocal');
+    app.disable('x-powered-by');
 
     const hits = new Map<string, { count: number; reset: number }>();
+    // Expired buckets are dropped once a minute; otherwise every distinct caller
+    // IP would leave a permanent entry. unref: never keeps the process alive.
+    setInterval(() => {
+        const now = Date.now();
+        for (const [k, b] of hits) if (now > b.reset) hits.delete(k);
+    }, 60_000).unref();
     const rateLimit = (perMinute: number) => (req: Request, res: Response, next: NextFunction) => {
         const key = req.ip ?? 'unknown';
         const now = Date.now();
@@ -330,6 +356,13 @@ export function createHttpApp({
         /** Sends the user on to Wrike's own login/consent page. */
         function redirectToWrike(res: Response, pendingUserId: string, resume?: string): void {
             const state = oauthState.issue(pendingUserId, resume);
+            res.cookie(flowCookie, oauthState.verify(state).nonce!, {
+                httpOnly: true,
+                sameSite: 'lax', // sent on Wrike's top-level redirect back to us
+                secure: cookieSecure,
+                maxAge: 10 * 60 * 1000,
+                path: '/',
+            });
             const params = new URLSearchParams({
                 client_id: oauthAuth.clientId,
                 response_type: 'code',
@@ -437,7 +470,8 @@ export function createHttpApp({
                 );
                 return;
             }
-            res.clearCookie(consentCookie, { path: '/' });
+            // Secure must match the set: browsers ignore a __Host- Set-Cookie without it.
+            res.clearCookie(consentCookie, { path: '/', secure: cookieSecure });
             if (!resume || !mcpOauth?.describePending(resume)) {
                 res.status(400).type('html').send(
                     page('Link expired', '<p>This sign-in link has expired. Start again from your MCP client.</p>')
@@ -457,9 +491,15 @@ export function createHttpApp({
                 res.status(400).send('Authorization was denied or failed. You can retry at /connect.');
                 return;
             }
-            const verified = state ? oauthState.verify(state) : { valid: false };
+            const verified = state ? oauthState.verify(state) : { valid: false as const };
+            const flow = readCookie(req, flowCookie);
+            res.clearCookie(flowCookie, { path: '/', secure: cookieSecure });
             if (!code || !verified.valid) {
                 res.status(400).send('Invalid or expired state parameter. Restart at /connect.');
+                return;
+            }
+            if (!flow || !verified.nonce || !timingSafeEqualStr(flow, verified.nonce)) {
+                res.status(400).send('This sign-in was started in a different browser. Restart at /connect.');
                 return;
             }
             const userId = verified.pendingUserId ?? `user-${randomHex(6)}`;

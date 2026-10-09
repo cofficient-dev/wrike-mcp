@@ -194,7 +194,7 @@ export class AuthManager {
         if (this.auth.mode !== 'oauth') throw new AuthError('refresh is only valid in oauth mode');
         if (!current.refreshToken) throw new AuthError('cannot refresh: no refresh token stored');
         const resp: OAuthTokenResponse = await refreshTokens(this.auth, current.refreshToken, this.fetchImpl);
-        const next = toStoredTokens(resp, current.host);
+        const next = toStoredTokens(resp, current.host, current.refreshToken);
         await this.storeUserTokens(userId, next);
         return next;
     }
