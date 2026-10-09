@@ -14,9 +14,10 @@ jobs:
   review:
     # Tracks @master on purpose: improvements to the central workflow (model,
     # prompt, fixes) apply to every repo that calls it. Accepted trade-off:
-    # whatever lands on central-workflows master runs here with OLLAMA_API_KEY,
-    # so changes to that repo's master must go through review. The secret is
-    # an LLM API key with no access to this repo's code or deployments.
+    # whatever lands on central-workflows master runs here with OLLAMA_API_KEY
+    # and this repo's GITHUB_TOKEN, so changes to that repo's master must go
+    # through review. The token is limited by the permissions block above
+    # (read code, write PR comments); the key is an LLM API key only.
     uses: cofficient-dev/central-workflows/.github/workflows/ai-review.yml@master
     secrets:
       OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
