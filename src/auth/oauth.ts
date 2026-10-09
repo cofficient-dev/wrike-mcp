@@ -52,8 +52,11 @@ export class OAuthStateManager {
         return `${payload}.${this.sign(payload)}`;
     }
 
-    /** Verifies signature and expiry; returns the bound pending user ID if present. */
-    verify(state: string): { valid: boolean; pendingUserId?: string; pendingResume?: string } {
+    /**
+     * Verifies signature and expiry; returns the bound pending user ID if present,
+     * and the nonce the callback compares against the browser's flow cookie.
+     */
+    verify(state: string): { valid: boolean; nonce?: string; pendingUserId?: string; pendingResume?: string } {
         const dot = state.lastIndexOf('.');
         if (dot <= 0) return { valid: false };
         const payload = state.slice(0, dot);
@@ -72,6 +75,7 @@ export class OAuthStateManager {
             }
             return {
                 valid: true,
+                nonce: parsed.nonce,
                 pendingUserId: typeof parsed.u === 'string' ? parsed.u : undefined,
                 pendingResume: typeof parsed.r === 'string' ? parsed.r : undefined,
             };
@@ -167,10 +171,15 @@ export async function refreshTokens(
     return json;
 }
 
-export function toStoredTokens(resp: OAuthTokenResponse, fallbackHost: string): StoredTokens {
+/**
+ * `previousRefreshToken` is kept when the response carries none: a refresh
+ * that does not rotate the token must not wipe it, or the user is locked out
+ * once the access token expires.
+ */
+export function toStoredTokens(resp: OAuthTokenResponse, fallbackHost: string, previousRefreshToken = ''): StoredTokens {
     return {
         accessToken: resp.access_token,
-        refreshToken: resp.refresh_token ?? '',
+        refreshToken: resp.refresh_token ?? previousRefreshToken,
         expiresAtMs: Date.now() + resp.expires_in * 1000,
         host: resp.host ?? fallbackHost,
     };

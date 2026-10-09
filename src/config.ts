@@ -2,6 +2,16 @@ import { z } from 'zod';
 
 const hex64 = z.string().regex(/^[0-9a-fA-F]{64}$/, 'must be 64 hex characters (32 bytes)');
 
+/**
+ * MCP-client redirect URIs accepted at dynamic client registration. Claude
+ * web/desktop use these; Claude Code and other local clients use a loopback
+ * URI on any port (allowed separately).
+ */
+export const DEFAULT_REDIRECT_ALLOWLIST = [
+    'https://claude.ai/api/mcp/auth_callback',
+    'https://claude.com/api/mcp/auth_callback',
+];
+
 const envSchema = z.object({
     PORT: z.coerce.number().int().positive().default(3000),
     HOST: z.string().default('127.0.0.1'),
@@ -15,7 +25,8 @@ const envSchema = z.object({
     TOKEN_ENCRYPTION_KEY: hex64,
     TOKEN_STORE_PATH: z.string().default('data/tokens.json'),
     PUBLIC_BASE_URL: z.string().url().optional(),
-
+    MCP_REDIRECT_URI_ALLOWLIST: z.string().optional(),
+    MCP_ALLOW_LOOPBACK_REDIRECTS: z.enum(['true', 'false']).default('true'),
 });
 
 export interface PatConfig {
@@ -42,7 +53,10 @@ export interface AppConfig {
     tokenStorePath: string;
     /** Public origin (scheme+host[+path prefix]) used in OAuth metadata, e.g. https://host/wrike */
     publicBaseUrl?: string;
-
+    /** Exact redirect URIs accepted at DCR; defaults to DEFAULT_REDIRECT_ALLOWLIST. */
+    redirectUriAllowlist?: string[];
+    /** Also accept http://localhost / 127.0.0.1 / [::1] on any port at DCR; defaults to true. */
+    allowLoopbackRedirects?: boolean;
 }
 
 export class ConfigError extends Error { }
@@ -88,5 +102,9 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
         tokenEncryptionKey: Buffer.from(e.TOKEN_ENCRYPTION_KEY, 'hex'),
         tokenStorePath: e.TOKEN_STORE_PATH,
         publicBaseUrl: e.PUBLIC_BASE_URL?.replace(/\/$/, ''),
+        redirectUriAllowlist: e.MCP_REDIRECT_URI_ALLOWLIST
+            ? e.MCP_REDIRECT_URI_ALLOWLIST.split(',').map((s) => s.trim()).filter(Boolean)
+            : DEFAULT_REDIRECT_ALLOWLIST,
+        allowLoopbackRedirects: e.MCP_ALLOW_LOOPBACK_REDIRECTS === 'true',
     };
 }

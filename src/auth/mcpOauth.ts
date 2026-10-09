@@ -1,6 +1,6 @@
 import { createHmac, timingSafeEqual, randomBytes, createHash } from 'node:crypto';
 import type { AuthManager } from './authManager.js';
-import type { OAuthConfig } from '../config.js';
+import { DEFAULT_REDIRECT_ALLOWLIST, type OAuthConfig } from '../config.js';
 
 /**
  * MCP-native OAuth 2.1 authorization server (RFC 8414 / MCP spec).
@@ -139,11 +139,23 @@ export class McpOAuthServer {
         config: OAuthConfig,
         private readonly authManager: AuthManager,
         publicBaseUrl: string,
+        private readonly redirectPolicy: { allowlist: string[]; allowLoopback: boolean } = {
+            allowlist: DEFAULT_REDIRECT_ALLOWLIST,
+            allowLoopback: true,
+        },
         private readonly ttlMs: number = 10 * 60 * 1000
     ) {
         this.secret = createHmac('sha256', 'wrike-mcp-oauth-as').update(config.clientSecret).digest();
         this.scopes = config.scopes;
         this.publicBaseUrl = publicBaseUrl;
+    }
+
+    /** Exact allow-list match, or loopback http on any port when enabled. */
+    private redirectUriAllowed(uri: string): boolean {
+        if (this.redirectPolicy.allowlist.includes(uri)) return true;
+        if (!this.redirectPolicy.allowLoopback) return false;
+        const u = new URL(uri);
+        return u.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(u.hostname);
     }
 
     private sign(payload: string): string {
@@ -220,6 +232,12 @@ export class McpOAuthServer {
             : [];
         if (redirectUris.length === 0) {
             throw new McpOauthError('invalid_redirect_uri', 400, 'redirect_uris must contain at least one http(s) URI');
+        }
+        // Open DCR with arbitrary redirect URIs would let anyone register a
+        // client whose codes land on their own server; only allow-listed
+        // callbacks (Claude) and, optionally, loopback (local clients) pass.
+        if (!redirectUris.every((u) => this.redirectUriAllowed(u))) {
+            throw new McpOauthError('invalid_redirect_uri', 400, 'redirect_uris must be allow-listed');
         }
         const clientId = `mcp_${randomBytes(16).toString('base64url')}`;
         // client_name is display-only and attacker-controlled: it is never

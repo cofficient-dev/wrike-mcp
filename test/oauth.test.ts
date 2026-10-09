@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { OAuthStateManager, exchangeCodeForTokens, refreshTokens } from '../src/auth/oauth.js';
+import { OAuthStateManager, exchangeCodeForTokens, refreshTokens, toStoredTokens } from '../src/auth/oauth.js';
 import type { OAuthConfig } from '../src/config.js';
 
 describe('OAuthStateManager', () => {
@@ -7,12 +7,12 @@ describe('OAuthStateManager', () => {
 
   it('issues and verifies a fresh state', () => {
     const state = manager.issue();
-    expect(manager.verify(state)).toEqual({ valid: true, pendingUserId: undefined });
+    expect(manager.verify(state)).toMatchObject({ valid: true, pendingUserId: undefined });
   });
 
   it('binds a pending user handle into the state', () => {
     const state = manager.issue('alice');
-    expect(manager.verify(state)).toEqual({ valid: true, pendingUserId: 'alice' });
+    expect(manager.verify(state)).toMatchObject({ valid: true, pendingUserId: 'alice' });
   });
 
   it('rejects a forged state', () => {
@@ -144,5 +144,12 @@ describe('refreshTokens', () => {
       /HTTP 429 \(rate_limited\): Too many requests/
     );
     expect(fetchImpl).toHaveBeenCalledTimes(3);
+  });
+});
+describe('toStoredTokens', () => {
+  it('keeps the previous refresh token when the response carries none', () => {
+    const t = toStoredTokens({ access_token: 'a2', token_type: 'bearer', expires_in: 3600 }, 'www.wrike.com', 'r1');
+    expect(t.refreshToken).toBe('r1');
+    expect(toStoredTokens({ access_token: 'a3', refresh_token: 'r2', token_type: 'bearer', expires_in: 3600 }, 'www.wrike.com', 'r1').refreshToken).toBe('r2');
   });
 });

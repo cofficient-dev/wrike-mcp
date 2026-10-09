@@ -29,7 +29,17 @@ function oauthConfig(publicBaseUrl?: string): AppConfig {
         tokenEncryptionKey: key,
         tokenStorePath: join(tmpdir(), `mcpoauth-${randomBytes(4).toString('hex')}`, 'tokens.json'),
         ...(publicBaseUrl ? { publicBaseUrl } : {}),
+        redirectUriAllowlist: ['https://claude.ai/callback', 'https://claude.ai/callback?tenant=acme'],
     };
+}
+
+/**
+ * The flow cookie a real browser would carry back from Wrike: its value is the
+ * nonce inside the signed state. Both cookie names, so it works over http and https.
+ */
+function flowCookie(state: string): string {
+    const nonce = (JSON.parse(Buffer.from(state.split('.')[0]!, 'base64url').toString('utf8')) as { nonce: string }).nonce;
+    return `wrike_mcp_flow=${nonce}; __Host-wrike_mcp_flow=${nonce}`;
 }
 
 function makeApp(config: AppConfig, wrikeTokens?: { access_token: string; refresh_token: string; expires_in: number }) {
@@ -175,7 +185,7 @@ describe('MCP OAuth authorization-code flow', () => {
         const state = wrikeUrl.searchParams.get('state')!;
 
         // 4. Wrike calls back: user is redirected to the CLIENT with a code.
-        const cb = await request(app).get('/oauth/callback').query({ code: 'wrike-code-1', state });
+        const cb = await request(app).get('/oauth/callback').set('Cookie', flowCookie(state)).query({ code: 'wrike-code-1', state });
         expect(cb.status).toBe(302);
         const back = new URL(cb.headers.location!);
         expect(back.origin + back.pathname).toBe(clientRedirectUri);
@@ -225,7 +235,7 @@ describe('MCP OAuth authorization-code flow', () => {
         const connectUrl = new URL(auth.headers.location!, 'https://mcp.example.com');
         const connect = await consent(app, connectUrl);
         const state = new URL(connect.headers.location!, 'https://login.wrike.com').searchParams.get('state')!;
-        const cb = await request(app).get('/oauth/callback').query({ code: 'wrike-code-2', state });
+        const cb = await request(app).get('/oauth/callback').set('Cookie', flowCookie(state)).query({ code: 'wrike-code-2', state });
         const code = new URL(cb.headers.location!).searchParams.get('code')!;
 
         const bad = pkce();
@@ -284,7 +294,7 @@ describe('MCP OAuth authorization-code flow', () => {
         const connectUrl = new URL(auth.headers.location!, 'https://mcp.example.com');
         const connect = await consent(app, connectUrl);
         const state = new URL(connect.headers.location!, 'https://login.wrike.com').searchParams.get('state')!;
-        const cb = await request(app).get('/oauth/callback').query({ code: 'wrike-code-x', state });
+        const cb = await request(app).get('/oauth/callback').set('Cookie', flowCookie(state)).query({ code: 'wrike-code-x', state });
         expect(cb.status).toBe(302);
         const code = new URL(cb.headers.location!).searchParams.get('code')!;
         const tok = await request(app).post('/oauth/token').send({
@@ -391,7 +401,7 @@ describe('MCP OAuth authorization-code flow', () => {
         // other than the one the authorization was started for.
         const connect = await consent(app, connectUrl, { user: 'someone-else' });
         const state = new URL(connect.headers.location!, 'https://login.wrike.com').searchParams.get('state')!;
-        const cb = await request(app).get('/oauth/callback').query({ code: 'wrike-code-mismatch', state });
+        const cb = await request(app).get('/oauth/callback').set('Cookie', flowCookie(state)).query({ code: 'wrike-code-mismatch', state });
 
         // No code is handed to the client; the user gets their own token page.
         expect(cb.status).toBe(200);
@@ -464,7 +474,7 @@ describe('MCP OAuth authorization-code flow', () => {
         const connectUrl = new URL(auth.headers.location!, 'https://mcp.example.com');
         const connect = await consent(app, connectUrl);
         const state = new URL(connect.headers.location!, 'https://login.wrike.com').searchParams.get('state')!;
-        const cb = await request(app).get('/oauth/callback').query({ code: 'wrike-frag', state });
+        const cb = await request(app).get('/oauth/callback').set('Cookie', flowCookie(state)).query({ code: 'wrike-frag', state });
         const back = new URL(cb.headers.location!);
         expect(back.searchParams.get('tenant')).toBe('acme');
         expect(back.searchParams.get('code')).toBeTruthy();
@@ -560,7 +570,7 @@ describe('MCP OAuth authorization-code flow', () => {
         // First user claims the handle.
         const first = await request(app).get('/connect').query({ user: 'ben' });
         const state = new URL(first.headers.location!, 'https://login.wrike.com').searchParams.get('state')!;
-        expect((await request(app).get('/oauth/callback').query({ code: 'w1', state })).status).toBe(200);
+        expect((await request(app).get('/oauth/callback').set('Cookie', flowCookie(state)).query({ code: 'w1', state })).status).toBe(200);
 
         // A second browser must not repoint that slot at a different Wrike account:
         // connection tokens already issued for 'ben' resolve through it.
@@ -584,7 +594,7 @@ describe('MCP OAuth authorization-code flow', () => {
         const connectUrl = new URL(auth.headers.location!, 'https://mcp.example.com');
         const connect = await consent(app, connectUrl);
         const state = new URL(connect.headers.location!, 'https://login.wrike.com').searchParams.get('state')!;
-        const cb = await request(app).get('/oauth/callback').query({ code: 'wrike-code-rev', state });
+        const cb = await request(app).get('/oauth/callback').set('Cookie', flowCookie(state)).query({ code: 'wrike-code-rev', state });
         const code = new URL(cb.headers.location!).searchParams.get('code')!;
         const tok = await request(app).post('/oauth/token').send({
             grant_type: 'authorization_code',
@@ -618,7 +628,7 @@ describe('MCP OAuth authorization-code flow', () => {
         const connectUrl = new URL(auth.headers.location!, 'https://mcp.example.com');
         const connect = await consent(app, connectUrl);
         const state = new URL(connect.headers.location!, 'https://login.wrike.com').searchParams.get('state')!;
-        const cb = await request(app).get('/oauth/callback').query({ code: 'wrike-code-cc', state });
+        const cb = await request(app).get('/oauth/callback').set('Cookie', flowCookie(state)).query({ code: 'wrike-code-cc', state });
         const code = new URL(cb.headers.location!).searchParams.get('code')!;
         const tok = await request(app).post('/oauth/token').send({
             grant_type: 'authorization_code',
@@ -642,11 +652,11 @@ describe('MCP OAuth authorization-code flow', () => {
         const s1 = new URL(first.headers.location!, 'https://login.wrike.com').searchParams.get('state')!;
         const s2 = new URL(second.headers.location!, 'https://login.wrike.com').searchParams.get('state')!;
 
-        const cb1 = await request(app).get('/oauth/callback').query({ code: 'race-1', state: s1 });
+        const cb1 = await request(app).get('/oauth/callback').set('Cookie', flowCookie(s1)).query({ code: 'race-1', state: s1 });
         expect(cb1.status).toBe(200);
         // The loser must not overwrite the winner's tokens: that would repoint
         // every connection token already issued for 'ben' at another account.
-        const cb2 = await request(app).get('/oauth/callback').query({ code: 'race-2', state: s2 });
+        const cb2 = await request(app).get('/oauth/callback').set('Cookie', flowCookie(s2)).query({ code: 'race-2', state: s2 });
         expect(cb2.status).toBe(409);
         expect(await authManager.listUsers()).toEqual(['ben']);
     });
@@ -687,8 +697,43 @@ describe('plain connect flow is unchanged', () => {
         const { app } = makeApp(oauthConfig('https://mcp.example.com'));
         const connect = await request(app).get('/connect');
         const state = new URL(connect.headers.location!, 'https://login.wrike.com').searchParams.get('state')!;
-        const cb = await request(app).get('/oauth/callback').query({ code: 'wrike-code-3', state });
+        const cb = await request(app).get('/oauth/callback').set('Cookie', flowCookie(state)).query({ code: 'wrike-code-3', state });
         expect(cb.status).toBe(200);
         expect(cb.text).toContain('Authorization: Bearer');
+    });
+});
+describe('MCP OAuth hardening', () => {
+    it('only registers allow-listed or loopback redirect URIs', async () => {
+        const { app } = makeApp(oauthConfig('https://mcp.example.com/wrike'));
+        const evil = await request(app).post('/oauth/register').send({ redirect_uris: ['https://evil.example/cb'] });
+        expect(evil.status).toBe(400);
+        const mixed = await request(app)
+            .post('/oauth/register')
+            .send({ redirect_uris: ['https://claude.ai/callback', 'https://evil.example/cb'] });
+        expect(mixed.status).toBe(400);
+        const loopback = await request(app).post('/oauth/register').send({ redirect_uris: ['http://localhost:53123/callback'] });
+        expect(loopback.status).toBe(201);
+    });
+
+    it('refuses a Wrike callback from a browser that did not start the sign-in', async () => {
+        const { app } = makeApp(oauthConfig('https://mcp.example.com/wrike'));
+        const clientRedirectUri = 'https://claude.ai/callback';
+        const reg = await request(app).post('/oauth/register').send({ redirect_uris: [clientRedirectUri] });
+        const auth = await request(app).get('/oauth/authorize').query({
+            client_id: reg.body.client_id,
+            redirect_uri: clientRedirectUri,
+            code_challenge: pkce().challenge,
+            code_challenge_method: 'S256',
+        });
+        const connect = await consent(app, new URL(auth.headers.location!));
+        const state = new URL(connect.headers.location!, 'https://login.wrike.com').searchParams.get('state')!;
+        // The attacker forwards the Wrike link; the victim's browser has no flow cookie.
+        const noCookie = await request(app).get('/oauth/callback').query({ code: 'victim-code', state });
+        expect(noCookie.status).toBe(400);
+        const wrongCookie = await request(app)
+            .get('/oauth/callback')
+            .set('Cookie', '__Host-wrike_mcp_flow=someone-else')
+            .query({ code: 'victim-code', state });
+        expect(wrongCookie.status).toBe(400);
     });
 });
