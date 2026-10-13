@@ -30,6 +30,11 @@ export function registerSecret(value: string | undefined): void {
   if (value && value.length >= 8) literalSecrets.add(value);
 }
 
+/** Stops scrubbing a value that is no longer live (rotated or revoked token). */
+export function forgetSecret(value: string | undefined): void {
+  if (value) literalSecrets.delete(value);
+}
+
 /** Test seam: forget registered literals. */
 export function clearRegisteredSecrets(): void {
   literalSecrets.clear();

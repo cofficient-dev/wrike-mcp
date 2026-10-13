@@ -1,8 +1,8 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
-import type { ToolRegistry, McpContentResult } from './tools/toolRegistry.js';
+import type { Tool, ToolRegistry, McpContentResult } from './tools/toolRegistry.js';
 import type { WrikeClient } from './wrikeClient.js';
-import { WrikeApiError } from './wrikeClient.js';
+import { redact, errorMessage } from './redact.js';
 
 function isMcpContentResult(value: unknown): value is McpContentResult {
   return (
@@ -33,39 +33,44 @@ export function createMcpServer(
       tool.name,
       tool.description,
       tool.inputSchema,
-      async (args: Record<string, unknown>): Promise<CallToolResult> => {
-        try {
-          const result = await tool.handler(client, args);
-          if (isMcpContentResult(result)) {
-            return { content: result.__mcpContent, isError: false };
-          }
-          return {
-            content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
-            isError: false,
-          };
-        } catch (err) {
-          return {
-            content: [{ type: 'text', text: errorMessage(err) }],
-            isError: true,
-          };
-        }
-      }
+      async (args: Record<string, unknown>): Promise<CallToolResult> => redactResult(await runTool(tool, client, args))
     );
   }
 
   return server;
 }
 
-export function errorMessage(err: unknown): string {
-  if (err instanceof WrikeApiError) {
-    return `Wrike API error ${err.status} (${err.code}): ${err.message.replace(/^.*?: /, '')}`;
-  }
-  if (err instanceof Error) {
-    const msg = err.message;
-    if (/access_token|refresh_token|client_secret/i.test(msg)) {
-      return 'Authentication error: token redacted. Re-authorize via /connect.';
+async function runTool(
+  tool: Tool,
+  client: WrikeClient,
+  args: Record<string, unknown>
+): Promise<CallToolResult> {
+  try {
+    const result = await tool.handler(client, args);
+    if (isMcpContentResult(result)) {
+      return { content: result.__mcpContent, isError: false };
     }
-    return msg;
+    return {
+      content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+      isError: false,
+    };
+  } catch (err) {
+    return {
+      content: [{ type: 'text', text: errorMessage(err) }],
+      isError: true,
+    };
   }
-  return String(err);
+}
+
+/**
+ * The single redaction boundary for MCP tool results, success and error
+ * alike: a success result can carry upstream error text too (search folds
+ * it in), and everything here reaches the model and its transcript.
+ * Only text blocks are scrubbed; binary blocks (images) are not text.
+ */
+function redactResult(result: CallToolResult): CallToolResult {
+  return {
+    ...result,
+    content: result.content.map((c) => (c.type === 'text' ? { ...c, text: redact(c.text) } : c)),
+  };
 }
