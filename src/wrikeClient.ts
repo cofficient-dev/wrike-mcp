@@ -142,6 +142,17 @@ export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'DELETE';
 
 export type HttpFetch = (url: string, init?: RequestInit) => Promise<Response>;
 
+// Defense in depth: the host comes from the OAuth token response or config, and the
+// Bearer token is sent to it. Only wrike.com or a subdomain, no port/userinfo/path.
+const WRIKE_HOST_RE = /^([a-z0-9-]+\.)*wrike\.com$/i;
+
+function apiUrl(host: string, path: string): URL {
+  if (!WRIKE_HOST_RE.test(host)) {
+    throw new Error(`Refusing to call Wrike API: host ${JSON.stringify(host)} is not wrike.com or a subdomain`);
+  }
+  return new URL(`https://${host}/api/v4${path}`);
+}
+
 /**
  * Wrike API v4 client bound to a single user's credentials.
  * One instance per authenticated MCP request (cheap; holds no state).
@@ -195,7 +206,7 @@ export class WrikeClient {
   ): Promise<WrikeResponse<T>> {
     const host = await this.authManager.getHost(this.userId);
     const token = await this.authManager.getAccessToken(this.userId);
-    const url = new URL(`https://${host}/api/v4${path}`);
+    const url = apiUrl(host, path);
     for (const [k, v] of Object.entries(params)) {
       if (v !== undefined) url.searchParams.set(k, String(v));
     }
@@ -249,7 +260,7 @@ export class WrikeClient {
   ): Promise<WrikeResponse<T>> {
     const host = await this.authManager.getHost(this.userId);
     const token = await this.authManager.getAccessToken(this.userId);
-    const url = new URL(`https://${host}/api/v4${path}`);
+    const url = apiUrl(host, path);
     for (const [k, v] of Object.entries(fields)) {
       url.searchParams.set(k, v);
     }
@@ -295,7 +306,7 @@ export class WrikeClient {
   private async fetchBinary(path: string, params: QueryParams, attempt: number): Promise<Response> {
     const host = await this.authManager.getHost(this.userId);
     const token = await this.authManager.getAccessToken(this.userId);
-    const url = new URL(`https://${host}/api/v4${path}`);
+    const url = apiUrl(host, path);
     for (const [k, v] of Object.entries(params)) {
       if (v !== undefined) url.searchParams.set(k, String(v));
     }
