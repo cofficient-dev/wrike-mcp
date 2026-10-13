@@ -83,7 +83,14 @@ export class SessionManager {
 
   async handleRequest(req: Request, res: Response): Promise<void> {
     const sessionId = req.headers['mcp-session-id'] as string | undefined;
+    // The HTTP layer has already authenticated req and stored the resolved
+    // user ID; see httpServer.ts.
+    const userId = (req as Request & { resolvedUserId?: string }).resolvedUserId;
     let session = this.get(sessionId);
+    // A session belongs to the user who created it. Another user's id (leaked,
+    // logged, guessed) must look exactly like an unknown one, or the caller's
+    // tool calls (and DELETE) would run against the owner's Wrike account.
+    if (session && session.userId !== userId) session = undefined;
     if (!session) {
       if (sessionId) {
         // The client sent an mcp-session-id, but nothing here matches it.
@@ -145,9 +152,7 @@ export class SessionManager {
         return;
       }
       // No mcp-session-id header at all — this is the initialization case,
-      // unrelated to the above. The HTTP layer has already authenticated req
-      // and stored the resolved user ID; see httpServer.ts.
-      const userId = (req as Request & { resolvedUserId?: string }).resolvedUserId;
+      // unrelated to the above.
       if (!userId) {
         throw new Error('unauthenticated session');
       }
