@@ -115,6 +115,52 @@ describe('mcp endpoint auth', () => {
     expect(tools.text).toContain('create_task');
   });
 
+  it("rejects another user's mcp-session-id with 404 (tools/list and DELETE) while the owner keeps it", async () => {
+    const { app, authManager } = makeApp(oauthConfig());
+    const tokens = { accessToken: 'AT', refreshToken: 'RT', expiresAtMs: Date.now() + 3600_000, host: 'www.wrike.com' };
+    await authManager.storeUserTokens('alice', tokens);
+    await authManager.storeUserTokens('mallory', tokens);
+    const alice = await authManager.issueConnectionToken('alice');
+    const mallory = await authManager.issueConnectionToken('mallory');
+    const init = await request(app)
+      .post('/mcp')
+      .set('Authorization', `Bearer ${alice}`)
+      .set('Accept', 'application/json, text/event-stream')
+      .send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 't', version: '0' } } });
+    const sessionId = init.headers['mcp-session-id'] as string;
+
+    const asMallory = (method: 'post' | 'delete') =>
+      request(app)[method]('/mcp')
+        .set('Authorization', `Bearer ${mallory}`)
+        .set('mcp-session-id', sessionId)
+        .set('Accept', 'application/json, text/event-stream');
+    expect((await asMallory('post').send({ jsonrpc: '2.0', id: 2, method: 'tools/list' })).status).toBe(404);
+    expect((await asMallory('delete')).status).toBe(404);
+
+    const own = await request(app)
+      .post('/mcp')
+      .set('Authorization', `Bearer ${alice}`)
+      .set('mcp-session-id', sessionId)
+      .set('Accept', 'application/json, text/event-stream')
+      .send({ jsonrpc: '2.0', id: 3, method: 'tools/list' });
+    expect(own.status).toBe(200);
+  });
+
+  it('authenticates /mcp before parsing the body', async () => {
+    const { app } = makeApp(oauthConfig());
+    // Malformed JSON: if the body were parsed first this would be a 400, not a 401.
+    // Kept small: the 401 is sent without reading the body, so a large upload
+    // gets its connection reset mid-write (which is the point, but flaky to assert).
+    const res = await request(app).post('/mcp').set('Content-Type', 'application/json').send('{' + 'x'.repeat(1000));
+    expect(res.status).toBe(401);
+  });
+
+  it('caps bodies on every other route, including the 404 fallthrough', async () => {
+    const { app } = makeApp(oauthConfig());
+    const res = await request(app).post('/nope').set('Content-Type', 'application/json').send(JSON.stringify({ x: 'x'.repeat(200_000) }));
+    expect(res.status).toBe(413);
+  });
+
   it('serves in pat mode without a Bearer header (single user)', async () => {
     const { app } = makeApp(patConfig());
     const res = await request(app)
