@@ -83,7 +83,7 @@ mcp.example.com {
         -Server
     }
 
-    # Headroom over the app's own 50 MB limit (attachment uploads).
+    # Site-wide ceiling; the Wrike handles below tighten it per route.
     request_body {
         max_size 60MB
     }
@@ -92,14 +92,31 @@ mcp.example.com {
     # path, so these URLs are host-rooted and never match handle_path /wrike/*.
     # Without them, spec-compliant MCP clients fail discovery. Keep them first.
     handle /.well-known/oauth-authorization-server/wrike* {
+        request_body {
+            max_size 1MB
+        }
         reverse_proxy wrike-mcp:3000
     }
     handle /.well-known/oauth-protected-resource/wrike* {
+        request_body {
+            max_size 1MB
+        }
         reverse_proxy wrike-mcp:3000
     }
 
     # path routing: each MCP server gets a path prefix
+    # 50 MB body limit on /wrike/mcp (attachment uploads), 1 MB elsewhere.
     handle_path /wrike/* {
+        @wrike_mcp path /mcp /mcp/*
+        @wrike_other {
+            not path /mcp /mcp/*
+        }
+        request_body @wrike_mcp {
+            max_size 50MB
+        }
+        request_body @wrike_other {
+            max_size 1MB
+        }
         reverse_proxy wrike-mcp:3000
     }
     # handle /.well-known/oauth-authorization-server/github* {
