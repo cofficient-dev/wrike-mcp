@@ -84,6 +84,9 @@ export interface StoreFileData {
     >;
 }
 
+/** Max connection tokens kept per user; adding beyond this drops the oldest. */
+export const MAX_CONNECTION_TOKENS_PER_USER = 20;
+
 /** HMAC of a connection token under the store's key material (not reversible from disk). */
 export function connectionTokenHash(key: Buffer, token: string): string {
     return createHmac('sha256', deriveKeyMaterial(key)).update(`connection-token:${token}`).digest('hex');
@@ -149,7 +152,18 @@ export class EncryptedTokenStore {
         const tmp = `${this.filePath}.tmp`;
         await fs.mkdir(dirname(this.filePath), { recursive: true });
         await fs.writeFile(tmp, blob, { mode: 0o600 });
-        await fs.rename(tmp, this.filePath);
+        // Windows: AV/indexer briefly holds a just-written file, failing rename
+        // with EPERM/EBUSY. ponytail: fixed short backoff, same idea as graceful-fs.
+        for (let attempt = 0; ; attempt++) {
+            try {
+                await fs.rename(tmp, this.filePath);
+                return;
+            } catch (err) {
+                const code = (err as NodeJS.ErrnoException).code;
+                if (attempt >= 5 || (code !== 'EPERM' && code !== 'EBUSY')) throw err;
+                await new Promise((r) => setTimeout(r, 20 * (attempt + 1)));
+            }
+        }
     }
 
     async clear(): Promise<void> {
@@ -184,10 +198,11 @@ export class EncryptedTokenStore {
             const existing = data.users[userId];
             data.users[userId] = {
                 tokens: existing?.tokens ?? tokens,
+                // Records are appended in creation order, so the tail holds the newest.
                 connectionTokens: [
                     ...(existing?.connectionTokens ?? []),
                     { tokenHash: connectionTokenHash(this.key, plaintext), createdAt: Date.now() },
-                ],
+                ].slice(-MAX_CONNECTION_TOKENS_PER_USER),
             };
             await this.writeNow(data);
         });
