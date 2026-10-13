@@ -127,6 +127,9 @@ export class McpOauthError extends Error {
  * memory (single-instance deployment, same as sessions); the resume token
  * binding the two flows is HMAC-signed, expiring, and replay-safe.
  */
+/** Cap on in-memory dynamic client registrations. */
+export const MAX_CLIENTS = 1000;
+
 export class McpOAuthServer {
     private readonly pending = new Map<string, PendingAuthorization>();
     private readonly codes = new Map<string, IssuedCode>();
@@ -253,23 +256,23 @@ export class McpOAuthServer {
             typeof body.client_name === 'string' && body.client_name.trim()
                 ? body.client_name.trim().slice(0, 120)
                 : undefined;
-        this.clients.set(clientId, { clientId, redirectUris, createdAt: Date.now(), clientName });
         this.sweep();
-        // Keep the map bounded: drop registrations older than a day, then, if a
-        // burst of fresh registrations is still over the cap, evict oldest-first
-        // so an open DCR endpoint cannot grow the map without limit.
-        if (this.clients.size > 1000) {
+        // Keep the map bounded without ever deleting a live registration: drop
+        // ones older than a day, and if a burst is still at the cap, refuse the
+        // new one. Evicting instead would let an open-DCR flood silently break
+        // every connected client (invalid_client until they re-register).
+        // ponytail: a flood still blocks NEW registrations for up to a day;
+        // upgrade to per-client last-used expiry if that bites.
+        if (this.clients.size >= MAX_CLIENTS) {
             const cutoff = Date.now() - 24 * 60 * 60 * 1000;
             for (const [id, c] of this.clients) {
                 if (c.createdAt < cutoff) this.clients.delete(id);
             }
-            if (this.clients.size > 1000) {
-                const oldest = [...this.clients.values()].sort((a, b) => a.createdAt - b.createdAt);
-                for (const c of oldest.slice(0, this.clients.size - 1000)) {
-                    this.clients.delete(c.clientId);
-                }
+            if (this.clients.size >= MAX_CLIENTS) {
+                throw new McpOauthError('rate_limited', 429, 'client registration capacity reached; try again later');
             }
         }
+        this.clients.set(clientId, { clientId, redirectUris, createdAt: Date.now(), clientName });
         return {
             client_id: clientId,
             client_id_issued_at: Math.floor(Date.now() / 1000),
