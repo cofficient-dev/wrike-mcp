@@ -105,14 +105,14 @@ mcp.example.com {
     }
 
     # path routing: each MCP server gets a path prefix
-    # 50 MB body limit on /wrike/mcp (attachment uploads), 1 MB elsewhere.
+    # 55 MB on /wrike/mcp (headroom over the app's 50 MB), 1 MB elsewhere.
     handle_path /wrike/* {
         @wrike_mcp path /mcp /mcp/*
         @wrike_other {
             not path /mcp /mcp/*
         }
         request_body @wrike_mcp {
-            max_size 50MB
+            max_size 55MB
         }
         request_body @wrike_other {
             max_size 1MB

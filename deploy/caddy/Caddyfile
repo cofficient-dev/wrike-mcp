@@ -27,8 +27,8 @@ mcp.example.com {
 	# host-rooted, and therefore never matched by handle_path /wrike/*.
 	# Without these two handles, strict MCP clients fail discovery. Keep them
 	# ahead of the prefix block.
-	# Per-handle body limits under the site ceiling: 50 MB for /wrike/mcp
-	# (base64 attachment uploads), 1 MB for every other Wrike route.
+	# Per-handle body limits under the site ceiling: 55 MB for /wrike/mcp
+	# (headroom over the app's 50 MB so its JSON 413 wins), 1 MB elsewhere.
 	handle /.well-known/oauth-authorization-server/wrike* {
 		request_body {
 			max_size 1MB
@@ -50,7 +50,7 @@ mcp.example.com {
 			not path /mcp /mcp/*
 		}
 		request_body @wrike_mcp {
-			max_size 50MB
+			max_size 55MB
 		}
 		request_body @wrike_other {
 			max_size 1MB
