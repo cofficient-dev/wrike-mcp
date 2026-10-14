@@ -139,8 +139,16 @@ export function createHttpApp({
         next();
     };
 
-    app.use(express.json({ limit: '50mb' }));
-    app.use(express.urlencoded({ extended: false }));
+    // /mcp parses its own (large) body only after authenticating; see below.
+    // Everything else, including the 404 fallthrough, gets a small limit so an
+    // unauthenticated caller cannot make the process buffer megabytes.
+    const smallJson = express.json({ limit: '100kb' });
+    const smallForm = express.urlencoded({ extended: false, limit: '100kb' });
+    app.use((req, res, next) => {
+        // Same match as the /mcp route below (Express routing: case-insensitive, optional trailing slash).
+        if (/^\/mcp\/?$/i.test(req.path)) return next();
+        smallJson(req, res, (err?: unknown) => (err ? next(err) : smallForm(req, res, next)));
+    });
 
     app.get('/healthz', (_req, res) => {
         res.json({ status: 'ok' });
@@ -567,26 +575,40 @@ export function createHttpApp({
     }
 
     // --- MCP endpoint -------------------------------------------------------
-    app.all('/mcp', rateLimit(120), async (req, res) => {
-        try {
-            const userId = await resolveUser(req);
-            if (!userId) {
-                res.setHeader('WWW-Authenticate', 'Bearer realm="wrike-mcp"');
-                res.status(401).json({
-                    error: 'not_authorized',
-                    errorDescription:
-                        config.auth.mode === 'oauth'
-                            ? 'Connect your Wrike account at /connect and use the issued token as a Bearer header.'
-                            : 'No credentials configured.',
-                });
-                return;
+    // Authenticate BEFORE parsing: the 50mb limit (base64 attachment uploads)
+    // must never be spent on an unauthenticated caller's body.
+    app.all(
+        '/mcp',
+        rateLimit(120),
+        async (req, res, next) => {
+            try {
+                const userId = await resolveUser(req);
+                if (!userId) {
+                    res.setHeader('WWW-Authenticate', 'Bearer realm="wrike-mcp"');
+                    res.status(401).json({
+                        error: 'not_authorized',
+                        errorDescription:
+                            config.auth.mode === 'oauth'
+                                ? 'Connect your Wrike account at /connect and use the issued token as a Bearer header.'
+                                : 'No credentials configured.',
+                    });
+                    return;
+                }
+                (req as Request & { resolvedUserId?: string }).resolvedUserId = userId;
+                next();
+            } catch (err) {
+                res.status(500).json({ error: 'internal_error', errorDescription: redact(errorMessage(err)) });
             }
-            (req as Request & { resolvedUserId?: string }).resolvedUserId = userId;
-            await sessionManager.handleRequest(req, res);
-        } catch (err) {
-            res.status(500).json({ error: 'internal_error', errorDescription: redact(errorMessage(err)) });
+        },
+        express.json({ limit: '50mb' }),
+        async (req, res) => {
+            try {
+                await sessionManager.handleRequest(req, res);
+            } catch (err) {
+                res.status(500).json({ error: 'internal_error', errorDescription: redact(errorMessage(err)) });
+            }
         }
-    });
+    );
 
     // 404 + error handling with redaction.
     app.use((_req, res) => {
@@ -594,6 +616,12 @@ export function createHttpApp({
     });
     app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
         const message = err instanceof Error ? err.message : String(err);
+        // body-parser errors carry a 4xx status (413 too large, 400 malformed).
+        const status = (err as { status?: unknown })?.status;
+        if (typeof status === 'number' && status >= 400 && status < 500) {
+            res.status(status).json({ error: 'bad_request', errorDescription: redact(message) });
+            return;
+        }
         res.status(500).json({ error: 'internal_error', errorDescription: redact(message) });
     });
 

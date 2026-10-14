@@ -768,3 +768,23 @@ describe('trust proxy at app level', () => {
         expect(await registerWithSpoofedIps()).toEqual(Array(11).fill(201));
     });
 });
+
+describe('dynamic client registration capacity', () => {
+    it('refuses new registrations at the cap instead of evicting live clients', async () => {
+        const { McpOAuthServer, MAX_CLIENTS, McpOauthError } = await import('../src/auth/mcpOauth.js');
+        const config = oauthConfig('https://mcp.example.com/wrike');
+        if (config.auth.mode !== 'oauth') throw new Error('unreachable');
+        const authManager = new AuthManager(config.auth, new EncryptedTokenStore(config.tokenEncryptionKey, config.tokenStorePath));
+        const server = new McpOAuthServer(config.auth, authManager, 'https://mcp.example.com/wrike', {
+            allowlist: [],
+            allowLoopback: true,
+        });
+        const body = { redirect_uris: ['http://localhost:1234/cb'] };
+        const first = server.registerClient(body).client_id;
+        for (let i = 1; i < MAX_CLIENTS; i++) server.registerClient(body);
+        expect(() => server.registerClient(body)).toThrow(McpOauthError);
+        // The oldest registration survived the flood.
+        const lookup = server as unknown as { clientRedirectUris(id: string): string[] | undefined };
+        expect(lookup.clientRedirectUris(first)).toEqual(body.redirect_uris);
+    });
+});

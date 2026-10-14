@@ -85,3 +85,29 @@ describe('createMcpServer tool result wrapping', () => {
     expect(result).toEqual({ content: [{ type: 'text', text: 'boom' }], isError: true });
   });
 });
+
+describe('createMcpServer redaction boundary', () => {
+  it('redacts a registered bare credential on both the success and the error path', async () => {
+    const { registerSecret, forgetSecret } = await import('../src/redact.js');
+    const token = 'eyJ-live-wrike-access-token-123';
+    registerSecret(token);
+    try {
+      const upstream = `upstream said: invalid token ${token}`;
+      const registry = registryOf([
+        // search folds upstream error text into a successful result.
+        makeTool('ok', async () => ({ errors: [upstream] })),
+        makeTool('bad', async () => {
+          throw new Error(upstream);
+        }),
+      ]);
+      const cbs = captureCallbacks(registry, client);
+      for (const name of ['ok', 'bad']) {
+        const text = JSON.stringify(await cbs.get(name)!({}));
+        expect(text).not.toContain(token);
+        expect(text).toContain('[REDACTED]');
+      }
+    } finally {
+      forgetSecret(token);
+    }
+  });
+});

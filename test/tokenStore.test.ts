@@ -11,6 +11,7 @@ import {
   generateConnectionToken,
   connectionTokenHash,
   safeEqualHex,
+  MAX_CONNECTION_TOKENS_PER_USER,
 } from '../src/secrets/tokenStore.js';
 
 const key = randomBytes(32);
@@ -112,6 +113,16 @@ describe('EncryptedTokenStore (multi-user)', () => {
     await store.saveUserTokens('alice', { accessToken: 'AT2', refreshToken: 'RT2', expiresAtMs: 2, host: 'h' });
     expect(await store.resolveConnectionToken(ct)).toBe('alice');
     expect((await store.getUserTokens('alice'))!.accessToken).toBe('AT2');
+  });
+
+  it('caps connection tokens per user, dropping the oldest', async () => {
+    const t = { accessToken: 'AT', refreshToken: 'RT', expiresAtMs: 1, host: 'h' };
+    const first = await store.addConnectionToken('alice', t);
+    let last = first;
+    for (let i = 0; i < MAX_CONNECTION_TOKENS_PER_USER; i++) last = await store.addConnectionToken('alice', t);
+    expect(await store.resolveConnectionToken(first)).toBeUndefined();
+    expect(await store.resolveConnectionToken(last)).toBe('alice');
+    expect((await store.getUser('alice'))!.connectionTokens).toHaveLength(MAX_CONNECTION_TOKENS_PER_USER);
   });
 
   it('deleteUser removes only that user', async () => {

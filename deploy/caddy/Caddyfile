@@ -14,7 +14,8 @@ mcp.example.com {
 		-Server
 	}
 
-	# 60 MB request body limit (headroom over the app's own 50 MB).
+	# Site-wide ceiling for every server behind this proxy (headroom over the
+	# app's own 50 MB). Handles below tighten it per route.
 	request_body {
 		max_size 60MB
 	}
@@ -26,16 +27,34 @@ mcp.example.com {
 	# host-rooted, and therefore never matched by handle_path /wrike/*.
 	# Without these two handles, strict MCP clients fail discovery. Keep them
 	# ahead of the prefix block.
+	# Per-handle body limits under the site ceiling: 55 MB for /wrike/mcp
+	# (headroom over the app's 50 MB so its JSON 413 wins), 1 MB elsewhere.
 	handle /.well-known/oauth-authorization-server/wrike* {
+		request_body {
+			max_size 1MB
+		}
 		reverse_proxy wrike-mcp:3000
 	}
 	handle /.well-known/oauth-protected-resource/wrike* {
+		request_body {
+			max_size 1MB
+		}
 		reverse_proxy wrike-mcp:3000
 	}
 
 	# reverse_proxy is streaming-friendly by default (no buffering, no
 	# read/write timeouts on streamed responses).
 	handle_path /wrike/* {
+		@wrike_mcp path /mcp /mcp/*
+		@wrike_other {
+			not path /mcp /mcp/*
+		}
+		request_body @wrike_mcp {
+			max_size 55MB
+		}
+		request_body @wrike_other {
+			max_size 1MB
+		}
 		reverse_proxy wrike-mcp:3000
 	}
 

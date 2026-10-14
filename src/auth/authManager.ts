@@ -2,6 +2,7 @@ import type { StoredUserTokens } from '../secrets/tokenStore.js';
 import { refreshTokens, toStoredTokens, OAuthTokenResponse } from './oauth.js';
 import type { EncryptedTokenStore } from '../secrets/tokenStore.js';
 import type { PatConfig, OAuthConfig } from '../config.js';
+import { registerSecret, forgetSecret } from '../redact.js';
 
 /**
  * Per-user authentication manager.
@@ -45,13 +46,32 @@ export class AuthManager {
         return this.auth.mode;
     }
 
+    /**
+     * The only writer of this.users. Each user's live Wrike tokens are
+     * registered for literal scrubbing (redact.ts): an upstream error quoting a
+     * bare token matches no redaction pattern. Replaced tokens are forgotten
+     * so refresh rotation does not grow the literal set without bound.
+     */
+    private setUser(userId: UserId, state: UserState | undefined): void {
+        const old = this.users.get(userId)?.tokens;
+        forgetSecret(old?.accessToken);
+        forgetSecret(old?.refreshToken);
+        if (!state) {
+            this.users.delete(userId);
+            return;
+        }
+        this.users.set(userId, state);
+        registerSecret(state.tokens.accessToken);
+        registerSecret(state.tokens.refreshToken);
+    }
+
     // ------------------------------------------------------------------ boot
 
     /** Loads all stored users into memory (encrypted file -> memory only). */
     private async loadInitial(): Promise<void> {
         this.initialized ??= (async () => {
             for (const [userId, rec] of Object.entries((await this.store.read())?.users ?? {})) {
-                if (rec.tokens) this.users.set(userId, { tokens: rec.tokens });
+                if (rec.tokens) this.setUser(userId, { tokens: rec.tokens });
             }
         })();
         await this.initialized;
@@ -90,13 +110,12 @@ export class AuthManager {
     async storeUserTokens(userId: UserId, tokens: StoredUserTokens): Promise<void> {
         if (this.auth.mode !== 'oauth') throw new AuthError('storeUserTokens is only valid in oauth mode');
         const previous = this.users.get(userId);
-        this.users.set(userId, { tokens });
+        this.setUser(userId, { tokens });
         try {
             await this.store.saveUserTokens(userId, tokens);
         } catch (err) {
             // Keep memory and disk in step when the write fails.
-            if (previous) this.users.set(userId, previous);
-            else this.users.delete(userId);
+            this.setUser(userId, previous);
             throw err;
         }
     }
@@ -115,14 +134,14 @@ export class AuthManager {
         if (this.auth.mode !== 'oauth') throw new AuthError('storeUserTokens is only valid in oauth mode');
         await this.loadInitial();
         if (this.users.has(userId)) return false;
-        this.users.set(userId, { tokens });
+        this.setUser(userId, { tokens });
         try {
             await this.store.saveUserTokens(userId, tokens);
         } catch (err) {
             // Nothing was persisted, so the claim must not outlive the failure:
             // otherwise the handle reads as taken and every later /connect for
             // it 409s until the process restarts.
-            this.users.delete(userId);
+            this.setUser(userId, undefined);
             throw err;
         }
         return true;
@@ -145,7 +164,7 @@ export class AuthManager {
 
     /** Removes a user and all their tokens (self-service revoke). */
     async revokeUser(userId: UserId): Promise<void> {
-        this.users.delete(userId);
+        this.setUser(userId, undefined);
         await this.store.deleteUser(userId);
     }
 

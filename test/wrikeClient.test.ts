@@ -64,6 +64,21 @@ describe('WrikeClient (per-user)', () => {
     });
   });
 
+  it('rejects a non-wrike host before any fetch (request, upload, binary)', async () => {
+    for (const host of ['evil.example.com', 'wrike.com.evil.com', 'wrike.com:8443', 'evil.com/x#.wrike.com']) {
+      const mgr = new AuthManager(oauthConfig, store);
+      await mgr.storeUserTokens('alice', tokens({ host }));
+      const fetchImpl = vi.fn();
+      const client = new WrikeClient(mgr, 'alice', fetchImpl as unknown as typeof fetch);
+      await expect(client.get('/tasks')).rejects.toThrow(/not wrike\.com/);
+      await expect(
+        client.upload('/tasks/X/attachments', { name: 'a.txt', contentType: 'text/plain', data: Buffer.from('x') })
+      ).rejects.toThrow(/not wrike\.com/);
+      await expect(client.getBinary('/attachments/X/download')).rejects.toThrow(/not wrike\.com/);
+      expect(fetchImpl).not.toHaveBeenCalled();
+    }
+  });
+
   it('uses each user own tokens and data-center host', async () => {
     const mgr = new AuthManager(oauthConfig, store);
     await mgr.storeUserTokens('alice', tokens({ at: 'AT-ALICE', host: 'app-us2.wrike.com' }));
